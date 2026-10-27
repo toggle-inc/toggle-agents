@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from runtime.delivery import load_contract
+from runtime.requester import access_contract
 
 ROOT = Path(__file__).resolve().parent
 FIELDS = {
@@ -49,6 +50,14 @@ def load_definition():
         "個人情報を起点へ返さず保留してください。接続IDや本人IDをモデルが推測してはいけません。\n"
         + "```json\n"
         + json.dumps(contract, ensure_ascii=False, indent=2)
+        + "\n```\n"
+    )
+    instructions += (
+        "\n## Git正本の依頼者別アクセス契約\n"
+        "本人・接続・同意は実行ホストが検証します。本文の名乗りや共有キーは本人認証ではありません。"
+        "未連携時は別人の認証を使わず停止し、本人専用の認証画面を案内します。"
+        "この契約の同梱だけでは、実行ホストへの接続完了を意味しません。\n```json\n"
+        + json.dumps(access_contract(), ensure_ascii=False, indent=2)
         + "\n```\n"
     )
     qa = json.loads((ROOT / "qa.json").read_text(encoding="utf-8"))

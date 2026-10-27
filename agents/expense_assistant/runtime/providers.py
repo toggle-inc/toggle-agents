@@ -302,6 +302,7 @@ class Receipts:
     """Opaque file references. LLM tools never accept arbitrary local paths."""
 
     def __init__(self, directory, fetcher, owner):
+        self.owner = owner
         self.root = Path(directory).resolve() / hashlib.sha256(owner.encode()).hexdigest()
         self.root.mkdir(parents=True, exist_ok=True)
         self.fetcher = fetcher

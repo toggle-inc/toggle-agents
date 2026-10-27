@@ -19,7 +19,9 @@ spec.loader.exec_module(deploy)
 
 class DeploymentTests(unittest.TestCase):
     def test_definition_is_valid(self):
-        deploy.load_definition()
+        _, instructions, _ = deploy.load_definition()
+        self.assertIn("expense-requester-access/v1", instructions)
+        self.assertIn("requester_only_no_shared_or_admin_fallback", instructions)
 
     def test_copied_folder_builds_without_repository_or_sibling_agent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -55,6 +57,7 @@ class DeploymentTests(unittest.TestCase):
                 manifest["test_scenarios"], [json.loads((copied / "qa.json").read_text())]
             )
             self.assertEqual((output / "instructions.md").read_text(), deploy.load_definition()[1])
+            self.assertTrue((output / "runtime" / "requester.py").is_file())
             self.assertEqual(
                 {p.name for p in output.iterdir()},
                 {
