@@ -60,16 +60,25 @@ python3 deploy.py --tenant-id <配置先テナントID> --agent-id <既存エー
 CLI・実行基盤・その資格情報は外部依存です。「フォルダ単独」はこれらを内蔵する意味ではありません。
 配置先の権限・CI必須ルールは維持してください。CI限定の環境へローカルから直接配置しません。
 
+CLIのソース収集はGitの除外設定に従うため、Git管理下の `.deploy/` を直接composeすると
+実行コードが保存されません。生成済みパッケージをGitの外へコピーして使います。
+配置後も、この一時フォルダの配置ID・版情報を保持してください。
+
+```sh
+agent_deploy_stage=$(mktemp -d /tmp/toggle-agent-compose.XXXXXX)
+cp -R .deploy/candidate "$agent_deploy_stage/package"
+```
+
 まず公式CLIで計画を確認します（API書き込みなし）。
 
 ```sh
-agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID> --deterministic --standard-tools --dry-run
+agentize-dev-cli managed-agent compose --root "$agent_deploy_stage/package" --tenant-id <配置先テナントID> --deterministic --standard-tools --dry-run
 ```
 
 計画の接続先・テナント・既存エージェントIDを確認し、配置が承認されている場合だけ実行します。
 
 ```sh
-agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID> --deterministic --standard-tools
+agentize-dev-cli managed-agent compose --root "$agent_deploy_stage/package" --tenant-id <配置先テナントID> --deterministic --standard-tools
 ```
 
 これはDRAFTの作成・更新です。公開・SA/Buzz/Codexへの接続は自動実行しません。
@@ -96,6 +105,16 @@ Engine接続用の認証付きHTTP入口は `engine_mcp.py` で起動します�
 公開不能な規則・社員データ・秘密は同梱せず、実行環境から安全に注入します。
 
 ## 依頼者別接続への移行
+
+### 会話履歴の共通基盤
+
+`_foundation/` は共通ソースから同梱した履歴読取コード・契約・合成テストです。
+`mcp_server.create_server(service, conversation_reader=reader)` で任意に履歴ツールを登録できます。
+`expense_context` の教え・保留とは別です。既存の業務ツール・認証・書き込み承認は変更しません。
+readerを省略すると未登録のままです。親・兄弟フォルダへの実行時依存はありません。
+ホストは依頼者・元会話・スレッド・現在の発言・実行IDを検証し、権限と取得版を返却直前に再検査します。
+個人情報の履歴・中間結果も `delivery.json` に従って本人専用に配送し、返信先DMを元会話と取り違えません。
+SA／Buzzの実アダプター・実機往復・配置はまだ行っていません。
 
 複数社員が本人の権限で使うための設計・実装範囲は [MULTI_USER.md](MULTI_USER.md) を参照。
 現状の一人用MCP接続をそのまま共有してはいけません。

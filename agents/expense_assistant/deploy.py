@@ -42,6 +42,7 @@ def load_definition():
     instructions = (ROOT / "instructions.md").read_text(encoding="utf-8")
     if not instructions.strip():
         raise ValueError("instructions.md must not be empty")
+    instructions += "\n\n" + (ROOT / "_foundation" / "instructions.md").read_text(encoding="utf-8")
     contract = load_contract(ROOT)
     instructions += (
         "\n\n## Git正本の配送契約（配置時にdelivery.jsonから生成）\n"
@@ -102,6 +103,11 @@ def build(tenant_id, output, agent_id=None, connection_ids=()):
     try:
         (output / "skills").mkdir()
         (output / "instructions.md").write_text(instructions, encoding="utf-8")
+        shutil.copytree(
+            ROOT / "_foundation",
+            output / "_foundation",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "test_*.py"),
+        )
         shutil.copytree(
             ROOT / "runtime",
             output / "runtime",

@@ -76,12 +76,12 @@ class _PrivateHTTPS:
                 ]
                 if message["status"] == 401 and scope.get("path") == "/mcp":
                     headers = [(k, v) for k, v in headers if k.lower() != b"www-authenticate"]
-                    challenge = (
-                        "Bearer "
-                        f'resource_metadata="{self.origin}'
-                        '/.well-known/oauth-protected-resource"'
+                    challenge_parameters = (
+                        f'resource_metadata="{self.origin}/.well-known/oauth-protected-resource"'
                     )
-                    headers.append((b"www-authenticate", challenge.encode("ascii")))
+                    headers.append(
+                        (b"www-authenticate", ("Bearer " + challenge_parameters).encode("ascii"))
+                    )
                 message = {**message, "headers": headers}
             await send(message)
 

@@ -15,9 +15,11 @@
 
 ## 検証とパッケージ作成
 
-Python 3.11以上。以下はこのフォルダ内で実行します。Pythonの追加依存はありません。
+Python 3.11以上。以下はこのフォルダ内で実行します。オフラインビルド自体は標準ライブラリのみです。
+任意のMCP入口とその検証には `requirements.txt` の依存をインストールします。
 
 ```sh
+python3 -m pip install -r requirements.txt
 python3 -m unittest discover -s . -p 'test_*.py' -v
 python3 deploy.py --tenant-id <配置先テナントID>
 ```
@@ -39,16 +41,25 @@ python3 deploy.py --tenant-id <配置先テナントID> --agent-id <既存エー
 CLI・実行基盤・その資格情報は外部依存です。「フォルダ単独」はこれらを内蔵する意味ではありません。
 配置先の権限・CI必須ルールは維持してください。CI限定の環境へローカルから直接配置しません。
 
+CLIのソース収集はGitの除外設定に従うため、Git管理下の `.deploy/` を直接composeすると
+実行コードが保存されません。生成済みパッケージをGitの外へコピーして使います。
+配置後も、この一時フォルダの配置ID・版情報を保持してください。
+
+```sh
+agent_deploy_stage=$(mktemp -d /tmp/toggle-agent-compose.XXXXXX)
+cp -R .deploy/candidate "$agent_deploy_stage/package"
+```
+
 まず公式CLIで計画を確認します（API書き込みなし）。
 
 ```sh
-agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID> --dry-run
+agentize-dev-cli managed-agent compose --root "$agent_deploy_stage/package" --tenant-id <配置先テナントID> --dry-run
 ```
 
 計画の接続先・テナント・既存エージェントIDを確認し、配置が承認されている場合だけ実行します。
 
 ```sh
-agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID>
+agentize-dev-cli managed-agent compose --root "$agent_deploy_stage/package" --tenant-id <配置先テナントID>
 ```
 
 これはDRAFTの作成・更新です。公開・SA/Buzz/Codexへの接続は自動実行しません。
@@ -58,6 +69,15 @@ agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配
 公開はその後の別承認です。パッケージ生成・dry-run・DRAFT作成を実機動作成功とは扱いません。
 
 ## 現在の制限
+
+会話履歴の共通基盤を `_foundation/` に同梱しています。
+`mcp_server.create_server(conversation_reader=reader)` で、信頼済みホストが束縛した読取能力だけを登録できます。
+readerを省略した既存の使い方はツール未接続のままです。
+実行との束縛と閲覧権限を検証した接続を後で配置する場合は、`deploy.py --connection-id <接続ID>` で
+生成物だけに指定できます。このオプションは接続自体の作成・検証・権限付与を行いません。
+各エージェントの配置に親フォルダは不要です。共通ソースの編集・更新はリポジトリ側で行います。
+依頼者・元会話・スレッド・現在の発言・実行IDの認証、現在の閲覧権限と取得版の再検査が必要で、
+本文やモデルからのID指定では代用できません。SA／Buzzアダプターと実機確認は未対応です。
 
 ツールなし・記憶なしの合成テスト用です。業務サービスには接続しません。
 現在のビルダーはツール・スキル未接続の定義だけを受け付けます。

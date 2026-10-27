@@ -58,12 +58,34 @@ class DeploymentTests(unittest.TestCase):
             )
             self.assertEqual((output / "instructions.md").read_text(), deploy.load_definition()[1])
             self.assertTrue((output / "runtime" / "requester.py").is_file())
+            self.assertIn("read_conversation_context", (output / "instructions.md").read_text())
+            self.assertEqual(
+                (output / "_foundation" / "conversation.py").read_bytes(),
+                (copied / "_foundation" / "conversation.py").read_bytes(),
+            )
+            imported = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    "-I",
+                    "-c",
+                    "import sys; sys.path.insert(0, sys.argv[1]); "
+                    "from _foundation.conversation import ConversationReader; "
+                    "from mcp_server import create_server",
+                    str(output),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
             self.assertEqual(
                 {p.name for p in output.iterdir()},
                 {
                     "agentize.managed-agent.json",
                     "instructions.md",
                     "skills",
+                    "_foundation",
                     "runtime",
                     "mcp_server.py",
                     "engine_mcp.py",

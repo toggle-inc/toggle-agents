@@ -53,13 +53,39 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(
                 manifest["test_scenarios"], [json.loads((copied / "qa.json").read_text())]
             )
-            self.assertEqual(
-                (output / "instructions.md").read_bytes(), (copied / "instructions.md").read_bytes()
-            )
+            self.assertEqual((output / "instructions.md").read_text(), deploy.load_definition()[1])
             self.assertEqual(
                 {p.name for p in output.iterdir()},
-                {"agentize.managed-agent.json", "instructions.md", "skills"},
+                {
+                    "agentize.managed-agent.json",
+                    "instructions.md",
+                    "skills",
+                    "_foundation",
+                    "mcp_server.py",
+                    "requirements.txt",
+                },
             )
+            self.assertIn("read_conversation_context", (output / "instructions.md").read_text())
+            self.assertEqual(
+                (output / "_foundation" / "conversation.py").read_bytes(),
+                (copied / "_foundation" / "conversation.py").read_bytes(),
+            )
+            imported = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    "-I",
+                    "-c",
+                    "import sys; sys.path.insert(0, sys.argv[1]); "
+                    "from _foundation.conversation import ConversationReader; "
+                    "from mcp_server import create_server",
+                    str(output),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
             # Existing receipts/packages must never be replaced.
             again = subprocess.run(
                 [
@@ -84,6 +110,18 @@ class DeploymentTests(unittest.TestCase):
             output = deploy.build(123, Path(directory) / "package")
             manifest = json.loads((output / "agentize.managed-agent.json").read_text())
             self.assertNotIn("agent_id", manifest)
+
+    def test_verified_connection_is_only_bound_in_generated_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = deploy.build(123, Path(directory) / "package", connection_ids=(456,))
+            manifest = json.loads((output / "agentize.managed-agent.json").read_text())
+            self.assertEqual(manifest["conn_ids"], [456])
+            self.assertEqual(deploy.load_definition()[0]["conn_ids"], [])
+
+    def test_invalid_connection_binding_is_rejected(self):
+        for values in ((0,), (-1,), (True,), ("123",), (123, 123)):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                deploy.build(123, HERE / ".deploy" / "must-not-exist", connection_ids=values)
 
     def test_invalid_target_is_rejected(self):
         for value in (0, -1, True, "123"):
