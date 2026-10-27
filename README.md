@@ -18,7 +18,7 @@ SA・Buzz・Codexなどの入口は、ここで管理する同じ定義から配
 | 定義 | 内容 | このリポジトリでの状態 |
 |---|---|---|
 | [portable_qa](agents/portable_qa/) | 計算・短文作成・架空の質問による共通入口の確認 | 定義を収録。新しい正本と稼働版の再照合は未実施 |
-| [expense_assistant](agents/expense_assistant/) | 経費相談・明細プレビューのための共通業務契約 | 交通費プレビューのローカル処理を実装。業務ツール・本人認証は未接続 |
+| [expense_assistant](agents/expense_assistant/) | MF・領収書・カレンダー・運賃・規則・記憶の共通処理 | 16業務ツールとローカルMCPを実装。実アカウントでの受入検証は未完了 |
 
 経費アシスタントは既存実装の完全移植ではありません。名前やプロンプトの追加だけで
 カレンダー参照・運賃検索・MF明細登録が使えるようになったとは扱いません。
@@ -62,10 +62,13 @@ APIキー、OAuthトークン、非公開カレンダーURL、社内資料・社
 
 ## 検証
 
-Python 3.11以上、追加依存なしで定義の構造・境界を検査できます。
+Python 3.11以上。定義検査だけは標準ライブラリで実行できます。
+全体検査は各エージェントのテストも実行するため、経費ランタイムの依存を先にインストールします。
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3.11 -m venv .venv
+.venv/bin/pip install -r agents/expense_assistant/requirements.txt
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
 これは定義の検査です。ビルド互換性、実LLM評価、デプロイ、本人認証、各入口の実機往復は
