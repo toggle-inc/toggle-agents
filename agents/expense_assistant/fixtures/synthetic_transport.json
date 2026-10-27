@@ -1,0 +1,14 @@
+{
+  "timezone": "Asia/Tokyo",
+  "as_of": "2030-01-16T12:00:00+09:00",
+  "date_from": "2030-01-15",
+  "date_to": "2030-01-15",
+  "company": "架空商事（テスト用）",
+  "events": [
+    {"id": "synthetic-office", "start": "2030-01-15T09:00:00+09:00", "end": "2030-01-15T10:00:00+09:00", "summary": "架空の事務所で作業", "station": "テスト駅A", "mode": "onsite", "all_day": false, "status": "confirmed"},
+    {"id": "synthetic-visit", "start": "2030-01-15T11:00:00+09:00", "end": "2030-01-15T12:00:00+09:00", "summary": "架空の訪問先で打ち合わせ", "station": "テスト駅B", "mode": "onsite", "all_day": false, "status": "confirmed"}
+  ],
+  "fares": [
+    {"date": "2030-01-15", "from_station": "テスト駅A", "to_station": "テスト駅B", "amount_yen": 321, "source_ref": "synthetic:fare-a-to-b"}
+  ]
+}

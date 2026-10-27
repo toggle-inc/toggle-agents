@@ -5,6 +5,14 @@
 定義はagentize-kitの基本形式を維持し、生成物の配置には外部の公式
 `agentize-dev-cli` の `managed-agent compose` を使います。
 
+## 移植の進捗
+
+予定・確認済み駅・運賃情報から、出典と未確認事項付きの交通費候補を作る
+プラットフォーム非依存の純粋関数を追加しました。`python3 preview.py --demo` で、
+架空のデータによるプレビューを確認できます。
+これはローカル実装であり、業務ツールとしての接続・実データ取得・MF登録は未実装です。
+入力契約と残作業は [MIGRATION.md](MIGRATION.md) に記載しています。
+
 ## 収録内容
 
 - `agent.json` / `instructions.md`：本体の宣言と指示
