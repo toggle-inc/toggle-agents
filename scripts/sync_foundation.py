@@ -6,7 +6,15 @@ import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ("__init__.py", "conversation.py", "instructions.md", "test_conversation.py")
+FILES = (
+    "__init__.py",
+    "conversation.py",
+    "instructions.md",
+    "test_conversation.py",
+    "history_sources.py",
+    "test_history_sources.py",
+    "HISTORY_CONNECTIONS.md",
+)
 
 
 def sync(*, write=False):

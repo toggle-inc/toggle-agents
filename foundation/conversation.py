@@ -49,6 +49,7 @@ class Invocation:
     anchor_sequence: int
     execution: str
     expires_at: float
+    anchor_digest: str | None = None
 
     @property
     def source(self):
@@ -70,6 +71,7 @@ class Snapshot:
     revision: str
     messages: tuple[Message, ...]
     truncated: bool = False
+    consistency: str = "provider_revision"
 
 
 class HistoryBackend(Protocol):
@@ -126,6 +128,12 @@ class ConversationReader:
             raise ContextError("unverified_invocation")
         if type(invocation.anchor_sequence) is not int or invocation.anchor_sequence < 0:
             raise ContextError("unverified_invocation")
+        if invocation.anchor_digest is not None and (
+            not isinstance(invocation.anchor_digest, str)
+            or len(invocation.anchor_digest) != 64
+            or any(character not in "0123456789abcdef" for character in invocation.anchor_digest)
+        ):
+            raise ContextError("unverified_invocation")
         if (
             type(invocation.expires_at) not in (int, float)
             or not math.isfinite(invocation.expires_at)
@@ -152,6 +160,7 @@ class ConversationReader:
                 or not snapshot.revision.strip()
                 or len(snapshot.revision) > 128
                 or type(snapshot.truncated) is not bool
+                or snapshot.consistency not in ("provider_revision", "content_readback")
                 or not isinstance(snapshot.messages, tuple)
                 or len(snapshot.messages) > MAX_MESSAGES
             ):
@@ -191,6 +200,7 @@ class ConversationReader:
                 "status": "available",
                 "untrusted_data": True,
                 "truncated": snapshot.truncated,
+                "consistency": snapshot.consistency,
                 "messages": result,
             }
         except ContextError:

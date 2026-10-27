@@ -78,6 +78,7 @@ class DeploymentTests(unittest.TestCase):
                     "-c",
                     "import sys; sys.path.insert(0, sys.argv[1]); "
                     "from _foundation.conversation import ConversationReader; "
+                    "from _foundation.history_sources import SuccessAssistHistory, BuzzHistory; "
                     "from mcp_server import create_server",
                     str(output),
                 ],

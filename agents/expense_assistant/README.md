@@ -114,7 +114,9 @@ Engine接続用の認証付きHTTP入口は `engine_mcp.py` で起動します�
 readerを省略すると未登録のままです。親・兄弟フォルダへの実行時依存はありません。
 ホストは依頼者・元会話・スレッド・現在の発言・実行IDを検証し、権限と取得版を返却直前に再検査します。
 個人情報の履歴・中間結果も `delivery.json` に従って本人専用に配送し、返信先DMを元会話と取り違えません。
-SA／Buzzの実アダプター・実機往復・配置はまだ行っていません。
+SA／Buzzの読取アダプターは `_foundation/history_sources.py` に同梱しています。
+本人の資格情報・既存入口との実接続と、この版の実機往復・配置はまだ行っていません。
+接続方法と制限は [_foundation/HISTORY_CONNECTIONS.md](_foundation/HISTORY_CONNECTIONS.md) を参照してください。
 
 複数社員が本人の権限で使うための設計・実装範囲は [MULTI_USER.md](MULTI_USER.md) を参照。
 現状の一人用MCP接続をそのまま共有してはいけません。
