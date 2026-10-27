@@ -111,6 +111,7 @@ def build(tenant_id, output, agent_id=None, connection_ids=()):
             "mcp_server.py",
             "engine_mcp.py",
             "requester_mcp.py",
+            "authorization_app.py",
             "connect.py",
             "requirements.txt",
             "expense_preview.py",

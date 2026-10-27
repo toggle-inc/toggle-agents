@@ -68,6 +68,7 @@ class DeploymentTests(unittest.TestCase):
                     "mcp_server.py",
                     "engine_mcp.py",
                     "requester_mcp.py",
+                    "authorization_app.py",
                     "connect.py",
                     "requirements.txt",
                     "expense_preview.py",

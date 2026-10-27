@@ -53,6 +53,8 @@ def access_contract():
     """Static Git policy, not evidence of a host's implemented authentication."""
     return {
         "schema_version": "expense-requester-access/v1",
+        "authority": "agent_owned_no_engine_dependency",
+        "storage": "deployment_supplied_transactional_adapter",
         "principal": "verified_canonical_human_in_tenant",
         "identity_mapping": "trusted_explicit_account_link_only",
         "connection_selection": "requester_only_no_shared_or_admin_fallback",
@@ -85,6 +87,7 @@ class Requester:
     person_id: str
     expires_at: float
     kind: str = "human"
+    capabilities: frozenset[str] | None = None
 
     @property
     def owner(self):
@@ -174,6 +177,10 @@ class RequesterDispatcher:
 
     def _service(self, request_context, capability):
         person = self.validate_request(request_context)
+        if person.capabilities is not None and (
+            not isinstance(person.capabilities, frozenset) or capability not in person.capabilities
+        ):
+            raise AuthorizationRequiredError(capability)
         try:
             grant = self._resolve(person, capability)
         except Exception:

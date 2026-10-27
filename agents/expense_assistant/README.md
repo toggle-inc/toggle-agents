@@ -99,3 +99,6 @@ Engine接続用の認証付きHTTP入口は `engine_mcp.py` で起動します�
 
 複数社員が本人の権限で使うための設計・実装範囲は [MULTI_USER.md](MULTI_USER.md) を参照。
 現状の一人用MCP接続をそのまま共有してはいけません。
+
+認証・同意・トークンの正本もこのフォルダで管理します。
+配置先非依存の発行サービスと残る実接続の条件は [AUTHORIZATION.md](AUTHORIZATION.md) を参照。
