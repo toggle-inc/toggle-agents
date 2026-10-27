@@ -2,7 +2,7 @@
 
 No Engine imports or signing secrets. Login is verified by a configured SSO
 adapter; this program owns consent, resource tokens, scope checks and revocation.
-Only explicit public clients are accepted; no DCR, refresh or implicit grants.
+Only explicit public clients are accepted; rotating refresh, no DCR/implicit grants.
 """
 
 import base64
@@ -246,9 +246,19 @@ class AgentAuthorization:
     def _consent_key(self, person, client_id):
         return self._key("consent", person.owner + "\n" + client_id)
 
-    def _current(self, records, record):
-        if not record or record["expires_at"] <= self.clock():
+    def _current(self, records, record, *, refresh=False):
+        if not record or record.get("revoked", False):
             raise AuthorizationError()
+        expiry = record["expires_at"]
+        if expiry is None:
+            if not refresh or record.get("kind") != "refresh":
+                raise AuthorizationError()
+        elif expiry <= self.clock():
+            raise AuthorizationError()
+        if record.get("family_key"):
+            family = records.get(record["family_key"])
+            if not family or family["revoked"]:
+                raise AuthorizationError()
         consent = records.get(record["consent_key"])
         client = self._client(record["client_id"])
         if (
@@ -286,21 +296,87 @@ class AgentAuthorization:
                 raise AuthorizationError()
             record["used"] = True
             records.put(key, record)
-            token = secrets.token_urlsafe(48)
-            lifetime = 900
-            records.put(
-                self._key("token", token),
-                {
-                    **record,
-                    "expires_at": self.clock() + lifetime,
-                },
+            result = self._issue_pair(records, record)
+        return result
+
+    def _issue_pair(self, records, record):
+        base = {
+            field: record[field]
+            for field in (
+                "tenant_id",
+                "person_id",
+                "client_id",
+                "redirect_uri",
+                "resource",
+                "capabilities",
+                "consent_key",
+                "revision",
             )
+        }
+        family_key = record.get("family_key")
+        if family_key is None:
+            family_key = self._key("family", secrets.token_urlsafe(32))
+            records.put(family_key, {"revoked": False})
+        base["family_key"] = family_key
+        token, refresh_token = secrets.token_urlsafe(48), secrets.token_urlsafe(48)
+        lifetime = 900
+        records.put(
+            self._key("token", token),
+            {
+                **base,
+                "kind": "access",
+                "expires_at": self.clock() + lifetime,
+            },
+        )
+        # No fixed end date. Consent/client/family revocation is checked every use.
+        records.put(
+            self._key("refresh", refresh_token),
+            {
+                **base,
+                "kind": "refresh",
+                "expires_at": None,
+                "used": False,
+            },
+        )
         return {
             "access_token": token,
+            "refresh_token": refresh_token,
             "token_type": "Bearer",
             "expires_in": lifetime,
             "scope": " ".join(record["capabilities"]),
         }
+
+    def refresh(self, *, refresh_token, client_id, resource=None, capabilities=None):
+        self._client(client_id)
+        if not isinstance(refresh_token, str) or not 1 <= len(refresh_token) <= 8192:
+            raise AuthorizationError()
+        replayed, result = False, None
+        with self.store.transaction() as records:
+            key = self._key("refresh", refresh_token)
+            record = records.get(key)
+            # A wrong client/resource cannot invalidate another client's family.
+            if (
+                not record
+                or record["client_id"] != client_id
+                or (resource is not None and resource != self.resource)
+            ):
+                raise AuthorizationError()
+            self._current(records, record, refresh=True)
+            allowed = frozenset(record["capabilities"])
+            requested = allowed if capabilities is None else capabilities
+            if not isinstance(requested, frozenset) or not requested or not requested <= allowed:
+                raise AuthorizationError("invalid_scope")
+            if record["used"]:
+                records.put(record["family_key"], {"revoked": True})
+                replayed = True
+            else:
+                record["used"] = True
+                records.put(key, record)
+                result = self._issue_pair(records, {**record, "capabilities": sorted(requested)})
+        # Raise AFTER commit: otherwise transaction rollback would undo revocation.
+        if replayed:
+            raise AuthorizationError()
+        return result
 
     def authenticate(self, token):
         if not isinstance(token, str) or not 1 <= len(token) <= 8192:
@@ -320,11 +396,14 @@ class AgentAuthorization:
     def revoke_token(self, token, client_id):
         self._client(client_id)
         with self.store.transaction() as records:
-            key = self._key("token", token)
-            record = records.get(key)
-            if record and record["client_id"] == client_id:
-                record["revoked"] = True
-                records.put(key, record)
+            for kind in ("token", "refresh"):
+                key = self._key(kind, token)
+                record = records.get(key)
+                if record and record["client_id"] == client_id:
+                    if record.get("family_key"):
+                        records.put(record["family_key"], {"revoked": True})
+                    record["revoked"] = True
+                    records.put(key, record)
 
     def revoke_consent(self, context, client_id):
         person = self._login(context)

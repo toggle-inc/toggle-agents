@@ -98,7 +98,7 @@ class AuthorizationAppTests(unittest.IsolatedAsyncioTestCase):
             headers={**self.login(name), "origin": self.authority.issuer},
         )
 
-    async def token(self, name="alice"):
+    async def token_pair(self, name="alice"):
         page = await self.authorize(name)
         self.assertEqual(page.status_code, 200, page.text)
         consent = await self.decide(page, name)
@@ -116,7 +116,10 @@ class AuthorizationAppTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(reply.status_code, 200, reply.text)
-        return reply.json()["access_token"]
+        return reply.json()
+
+    async def token(self, name="alice"):
+        return (await self.token_pair(name))["access_token"]
 
     async def call(self, token, name="mf_offices", arguments=None):
         return await self.client.post(
@@ -204,7 +207,7 @@ class AuthorizationAppTests(unittest.IsolatedAsyncioTestCase):
             reply = await self.authorize(**params)
             self.assertEqual(reply.status_code, 400)
             self.assertNotIn("location", reply.headers)
-        for grant in ("refresh_token", "password", "client_credentials"):
+        for grant in ("password", "client_credentials"):
             result = await self.client.post("/oauth/token", data={"grant_type": grant})
             self.assertEqual(result.json()["error"], "unsupported_grant_type")
 
@@ -230,7 +233,9 @@ class AuthorizationAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_metadata_matches_authority_and_mcp_challenge(self):
         metadata = await self.client.get("/.well-known/oauth-authorization-server")
         self.assertEqual(metadata.json()["issuer"], self.authority.issuer)
-        self.assertEqual(metadata.json()["grant_types_supported"], ["authorization_code"])
+        self.assertEqual(
+            metadata.json()["grant_types_supported"], ["authorization_code", "refresh_token"]
+        )
         self.assertNotIn("registration_endpoint", metadata.json())
         unauthorized = await self.call("not-an-issued-personal-token")
         self.assertEqual(unauthorized.status_code, 401)
@@ -250,6 +255,49 @@ class AuthorizationAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.headers["cache-control"], "no-store")
         self.assertIn("frame-ancestors 'none'", page.headers["content-security-policy"])
         self.assertEqual(page.headers["referrer-policy"], "no-referrer")
+        self.assertIn("解除するまで継続", page.text)
+
+    @with_server
+    async def test_expired_mcp_token_can_refresh_without_login_then_reenter_mcp(self):
+        original = await self.token_pair()
+        self.fixture.now += 901
+        self.assertEqual((await self.call(original["access_token"])).status_code, 401)
+        # No cookie, login, consent UI, or resource override on refresh.
+        reply = await self.client.post(
+            "/oauth/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": "sa",
+                "refresh_token": original["refresh_token"],
+            },
+        )
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(reply.headers["cache-control"], "no-store")
+        updated = reply.json()
+        result = (await self.call(updated["access_token"])).json()["result"]
+        self.assertFalse(result.get("isError"), result)
+        self.assertIn("alice", json.dumps(result))
+        self.assertNotEqual(updated["refresh_token"], original["refresh_token"])
+
+    @with_server
+    async def test_http_refresh_reuse_revokes_new_access_and_refresh_tokens(self):
+        original = await self.token_pair()
+        form = {
+            "grant_type": "refresh_token",
+            "client_id": "sa",
+            "refresh_token": original["refresh_token"],
+        }
+        first = await self.client.post("/oauth/token", data=form)
+        self.assertEqual(first.status_code, 200)
+        current = first.json()
+        replay = await self.client.post("/oauth/token", data=form)
+        self.assertEqual(replay.status_code, 400)
+        self.assertEqual(replay.json()["error"], "invalid_grant")
+        self.assertEqual((await self.call(current["access_token"])).status_code, 401)
+        again = await self.client.post(
+            "/oauth/token", data={**form, "refresh_token": current["refresh_token"]}
+        )
+        self.assertEqual(again.status_code, 400)
 
 
 if __name__ == "__main__":

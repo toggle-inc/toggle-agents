@@ -123,7 +123,7 @@ class AuthorizationTests(unittest.TestCase):
             self.assertEqual(person.tenant_id, "synthetic-tenant")
             self.assertEqual(person.capabilities, frozenset({"mf:read"}))
             self.assertEqual(result["expires_in"], 900)
-            self.assertNotIn("refresh_token", result)
+            self.assertTrue(result["refresh_token"])
             tokens.append(token)
         self.assertNotEqual(*tokens)
 

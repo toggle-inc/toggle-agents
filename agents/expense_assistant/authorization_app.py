@@ -111,7 +111,7 @@ def create_app(authority, resolve):
                         "token_endpoint": origin + "/oauth/token",
                         "revocation_endpoint": origin + "/oauth/revoke",
                         "response_types_supported": ["code"],
-                        "grant_types_supported": ["authorization_code"],
+                        "grant_types_supported": ["authorization_code", "refresh_token"],
                         "code_challenge_methods_supported": ["S256"],
                         "token_endpoint_auth_methods_supported": ["none"],
                         "scopes_supported": sorted(CAPABILITIES),
@@ -160,6 +160,8 @@ def create_app(authority, resolve):
                     + scopes
                     + "</ul><p>MF・カレンダーへの連携同意、"
                     "および経費の個別登録承認は別に必要です。</p>"
+                    "<p>この利用許可は解除するまで継続し、接続用トークンを自動更新できます。"
+                    "不正な使い回しの検出時には停止します。</p>"
                     '<form method="post" action="/oauth/consent">'
                     + fields
                     + '<button name="decision" value="approve">許可する</button>'
@@ -182,6 +184,17 @@ def create_app(authority, resolve):
                 )
                 return RedirectResponse(target, status_code=303)
             if path == "/oauth/token":
+                if params.get("grant_type") == "refresh_token":
+                    return JSONResponse(
+                        authority.refresh(
+                            refresh_token=params["refresh_token"],
+                            client_id=params["client_id"],
+                            resource=params.get("resource"),
+                            capabilities=frozenset(params["scope"].split())
+                            if "scope" in params
+                            else None,
+                        )
+                    )
                 if params.get("grant_type") != "authorization_code":
                     raise AuthorizationError("unsupported_grant_type")
                 return JSONResponse(
