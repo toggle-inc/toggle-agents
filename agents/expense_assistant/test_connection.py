@@ -138,6 +138,25 @@ class ConnectionTests(unittest.TestCase):
         with self.assertRaises(ExpenseError):
             initialize_profile(self.env, self.private)
 
+    def test_private_reference_cache_can_be_bound_without_copying_it_to_public_source(self):
+        profile = initialize_profile(self.env, self.private)
+        references = self.private / "private-refs"
+        references.mkdir()
+        (references / "index.md").write_text("synthetic private reference")
+        record = json.loads(profile.read_text())
+        record["private_references"] = str(references)
+        profile.write_text(json.dumps(record))
+        service = connect(profile)
+        try:
+            self.assertEqual(service.read_reference()["text"], "synthetic private reference")
+            self.assertFalse(service.write_enabled)
+        finally:
+            service.state.close()
+            service.mf.http.close()
+        (references / "index.md").unlink()
+        with self.assertRaises(ExpenseError):
+            connect(profile)
+
     def test_unbound_metadata_cannot_read_legacy_tokens(self):
         client = LinkedMFClient(
             "synthetic-client",

@@ -55,10 +55,13 @@ def read_check(service, date, *, fare_from="", fare_to=""):
             )
         },
     )
-    report["checks"]["private_references"] = {
-        "ok": service.references is not None,
-        "status": "configured" if service.references else "not_configured",
-    }
+    if service.references:
+        probe(
+            "private_references",
+            lambda: {"document_read": bool(service.read_reference()["text"]), "status": "readable"},
+        )
+    else:
+        report["checks"]["private_references"] = {"ok": False, "status": "not_configured"}
     report["checks"]["attachments"] = {
         "ok": False,
         "status": "requires_actual_attachment",

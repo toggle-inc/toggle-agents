@@ -150,6 +150,17 @@ def connect(profile_path):
     settings = read_settings(profile["source_env"])
     if settings.get("KEIHI_OWNER_PUBKEY") != profile["owner"]:
         raise ExpenseError("既存設定の本人が変わっています。接続を停止します。")
+    reference_root = profile.get("private_references")
+    if reference_root:
+        reference_root = Path(reference_root).resolve()
+        if (
+            reference_root.is_relative_to(Path(__file__).resolve().parents[1])
+            or not (reference_root / "index.md").is_file()
+        ):
+            raise ExpenseError("非公開の参照資料ルートを確認してください。")
+    else:
+        original_refs = Path(profile["source_env"]).parent / "agent" / "refs" / "launchpad"
+        reference_root = original_refs if (original_refs / "index.md").is_file() else None
     mf = LinkedMFClient(
         settings["MF_CLIENT_ID"],
         settings["MF_CLIENT_SECRET"],
@@ -179,10 +190,6 @@ def connect(profile_path):
             profile["policy_sha256"],
             position=settings.get("KEIHI_POSITION") or "member",
         ),
-        references=str(Path(profile["source_env"]).parent / "agent" / "refs" / "launchpad")
-        if (
-            Path(profile["source_env"]).parent / "agent" / "refs" / "launchpad" / "index.md"
-        ).is_file()
-        else None,
+        references=str(reference_root) if reference_root else None,
         write_enabled=profile.get("write_enabled") is True,
     )
