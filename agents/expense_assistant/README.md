@@ -61,19 +61,22 @@ CLI・実行基盤・その資格情報は外部依存です。「フォルダ�
 まず公式CLIで計画を確認します（API書き込みなし）。
 
 ```sh
-agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID> --dry-run
+agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID> --deterministic --standard-tools --dry-run
 ```
 
 計画の接続先・テナント・既存エージェントIDを確認し、配置が承認されている場合だけ実行します。
 
 ```sh
-agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID>
+agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID> --deterministic --standard-tools
 ```
 
 これはDRAFTの作成・更新です。公開・SA/Buzz/Codexへの接続は自動実行しません。
 新規作成では先に対象テナントに同じエージェントがないか確認してください。
 失敗・タイムアウト・結果不明の場合は再送せず、管理画面と生成された配置情報で確認します。
 配置成功後も、実LLMで検証ケースを評価し、版・指示・能力をreadbackで照合してください。
+`allow_ask_human=false`、`memory_mode=off`、接続ID、指示本文、同梱ソースのハッシュを照合します。
+通常composeで既定値が残るCLI版では、本人の質問設定まで正本どおりとは扱いません。
+差分だけを許可したCAS更新または検証済みのdeterministic配置経路を使い、再度readbackします。
 公開はその後の別承認です。パッケージ生成・dry-run・DRAFT作成を実機動作成功とは扱いません。
 
 ## 現在の制限
