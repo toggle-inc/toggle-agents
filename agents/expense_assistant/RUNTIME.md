@@ -122,6 +122,24 @@ MCP対応クライアントは `resource_uri` から本人の画像/PDFを読み
 
 これはローカルMCPの実接続です。EngineやSAへ自動的に登録したり、個人の認証情報をクラウドへ転送したりしません。
 
+### Engineから本人専用ツールを利用する場合（テナント10限定検証）
+
+`engine_mcp.py` は同じサービスを認証付きStreamable HTTP MCPとして提供します。
+秘密・領収書・承認台帳は実行ホストの非公開領域に残します。新しい業務実装は複製しません。
+
+```sh
+.venv/bin/python engine_mcp.py issue-key --profile /private/common-expense/connection.json --key-file /private/common-expense/engine-key.json
+.venv/bin/python engine_mcp.py serve --profile /private/common-expense/connection.json --key-file /private/common-expense/engine-key.json --public-host YOUR_EXACT_HTTPS_HOST
+```
+
+- ホストはloopbackにだけbindし、別途設定したHTTPS入口から到達させます。匿名リクエストはMCP処理前に401、期限切れ・削除・本人不一致のキーも拒否します。
+- キーはテナント10・本人・最大24時間に束縛し、公開Git外へ600で保存します。再発行時に既存キーを上書きしません。
+- Engineのテナント10にAPI Key方式の外部MCP接続を作り、`Authorization: Bearer <接続キー>` を暗号化保存します。MFキー・OAuthトークン・iCal URLはEngineへコピーしません。
+- このキーは本人の道具を呼べる**接続権限**であり、リクエストごとの社員認証ではありません。信頼済み管理者の本人専用テストに限定します。複数社員・一般のSA入口へ共有してはいけません。
+- 接続IDを指定して経費アシスタントをDRAFT配置し、Engine Playgroundで検証します。作成・更新・削除・OCRの実行は個別承認なしには許可しません。
+- 一時HTTPSトンネルはPCとプロセスが動いている間だけ有効です。24時間後も使える常設クラウド配置や、SAからの本人確認付き承認操作を実装済みとは扱いません。
+- ソース同梱、接続登録、Engine実呼び出し成功、公開／各入口への反映はそれぞれ別に確認します。
+
 `deploy.py` は定義とランタイムソースを同じ成果物へ収録します。
 検証済みの本人専用MCP接続をEngineに登録した後、`--connection-id <接続ID>` で生成物だけへ束縛できます。
 正本の `conn_ids` は空のままです。接続を指定しないDRAFTに業務ツールが付いたとは扱いません。
