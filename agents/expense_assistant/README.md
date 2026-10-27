@@ -60,16 +60,25 @@ python3 deploy.py --tenant-id <配置先テナントID> --agent-id <既存エー
 CLI・実行基盤・その資格情報は外部依存です。「フォルダ単独」はこれらを内蔵する意味ではありません。
 配置先の権限・CI必須ルールは維持してください。CI限定の環境へローカルから直接配置しません。
 
+CLIのソース収集はGitの除外設定に従うため、Git管理下の `.deploy/` を直接composeすると
+実行コードが保存されません。生成済みパッケージをGitの外へコピーして使います。
+配置後も、この一時フォルダの配置ID・版情報を保持してください。
+
+```sh
+agent_deploy_stage=$(mktemp -d /tmp/toggle-agent-compose.XXXXXX)
+cp -R .deploy/candidate "$agent_deploy_stage/package"
+```
+
 まず公式CLIで計画を確認します（API書き込みなし）。
 
 ```sh
-agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID> --deterministic --standard-tools --dry-run
+agentize-dev-cli managed-agent compose --root "$agent_deploy_stage/package" --tenant-id <配置先テナントID> --deterministic --standard-tools --dry-run
 ```
 
 計画の接続先・テナント・既存エージェントIDを確認し、配置が承認されている場合だけ実行します。
 
 ```sh
-agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID> --deterministic --standard-tools
+agentize-dev-cli managed-agent compose --root "$agent_deploy_stage/package" --tenant-id <配置先テナントID> --deterministic --standard-tools
 ```
 
 これはDRAFTの作成・更新です。公開・SA/Buzz/Codexへの接続は自動実行しません。
