@@ -239,7 +239,11 @@ class AuthorizationAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("registration_endpoint", metadata.json())
         unauthorized = await self.call("not-an-issued-personal-token")
         self.assertEqual(unauthorized.status_code, 401)
-        self.assertIn("oauth-protected-resource", unauthorized.headers["www-authenticate"])
+        self.assertEqual(
+            unauthorized.headers["www-authenticate"],
+            "Bearer "
+            f'resource_metadata="{self.authority.issuer}/.well-known/oauth-protected-resource"',
+        )
         resource = await self.client.get("/.well-known/oauth-protected-resource")
         self.assertEqual(resource.json()["resource"], self.authority.resource)
 
