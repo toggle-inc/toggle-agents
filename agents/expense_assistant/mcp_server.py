@@ -8,6 +8,7 @@ import importlib.util
 import inspect
 from pathlib import Path
 
+from _foundation.conversation import register_history_tool
 from runtime.service import ORIGINAL_TOOLS
 from runtime.state import ExpenseError
 
@@ -43,10 +44,11 @@ DESCRIPTIONS = {
 }
 
 
-def create_server(service, *, receipt_reader=None):
+def create_server(service, *, receipt_reader=None, conversation_reader=None):
     from mcp.server.mcpserver import MCPServer
 
     server = MCPServer("expense-assistant")
+    register_history_tool(server, conversation_reader)
     for name in ORIGINAL_TOOLS + (
         "delivery_contract",
         "expense_context",

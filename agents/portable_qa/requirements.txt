@@ -1,0 +1,2 @@
+# Only needed for the optional MCP entrance; offline builds use the standard library.
+mcp==2.3.0

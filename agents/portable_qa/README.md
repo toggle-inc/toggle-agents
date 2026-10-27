@@ -15,9 +15,11 @@
 
 ## 検証とパッケージ作成
 
-Python 3.11以上。以下はこのフォルダ内で実行します。Pythonの追加依存はありません。
+Python 3.11以上。以下はこのフォルダ内で実行します。オフラインビルド自体は標準ライブラリのみです。
+任意のMCP入口とその検証には `requirements.txt` の依存をインストールします。
 
 ```sh
+python3 -m pip install -r requirements.txt
 python3 -m unittest discover -s . -p 'test_*.py' -v
 python3 deploy.py --tenant-id <配置先テナントID>
 ```
@@ -58,6 +60,15 @@ agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配
 公開はその後の別承認です。パッケージ生成・dry-run・DRAFT作成を実機動作成功とは扱いません。
 
 ## 現在の制限
+
+会話履歴の共通基盤を `_foundation/` に同梱しています。
+`mcp_server.create_server(conversation_reader=reader)` で、信頼済みホストが束縛した読取能力だけを登録できます。
+readerを省略した既存の使い方はツール未接続のままです。
+実行との束縛と閲覧権限を検証した接続を後で配置する場合は、`deploy.py --connection-id <接続ID>` で
+生成物だけに指定できます。このオプションは接続自体の作成・検証・権限付与を行いません。
+各エージェントの配置に親フォルダは不要です。共通ソースの編集・更新はリポジトリ側で行います。
+依頼者・元会話・スレッド・現在の発言・実行IDの認証、現在の閲覧権限と取得版の再検査が必要で、
+本文やモデルからのID指定では代用できません。SA／Buzzアダプターと実機確認は未対応です。
 
 ツールなし・記憶なしの合成テスト用です。業務サービスには接続しません。
 現在のビルダーはツール・スキル未接続の定義だけを受け付けます。
