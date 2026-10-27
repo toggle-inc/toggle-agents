@@ -58,7 +58,15 @@ class DeploymentTests(unittest.TestCase):
             )
             self.assertEqual(
                 {p.name for p in output.iterdir()},
-                {"agentize.managed-agent.json", "instructions.md", "skills"},
+                {
+                    "agentize.managed-agent.json",
+                    "instructions.md",
+                    "skills",
+                    "runtime",
+                    "mcp_server.py",
+                    "requirements.txt",
+                    "expense_preview.py",
+                },
             )
             # Existing receipts/packages must never be replaced.
             again = subprocess.run(
@@ -113,6 +121,14 @@ class DeploymentTests(unittest.TestCase):
             path.write_text(json.dumps(config))
             with patch.object(deploy, "ROOT", copied), self.assertRaises(ValueError):
                 deploy.load_definition()
+
+    def test_optional_connection_is_bound_only_in_generated_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = deploy.build(123, Path(directory) / "package", connection_ids=[456])
+            manifest = json.loads((output / "agentize.managed-agent.json").read_text())
+            self.assertEqual(manifest["conn_ids"], [456])
+            self.assertEqual(json.loads((HERE / "agent.json").read_text())["conn_ids"], [])
+            self.assertTrue((output / "runtime" / "service.py").is_file())
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 {
-  "display_name": "経費アシスタント（移植準備中）",
-  "description": "経費相談・交通費候補・明細プレビューの共通業務契約。現在は業務ツールと本人認証が未接続。",
+  "display_name": "経費アシスタント",
+  "description": "MF・領収書・カレンダー・運賃・規則点検を共通ランタイムで提供。本人専用の認証・非公開規則・MCP接続設定が必要。",
   "allow_ask_human": false,
   "memory_mode": "off",
   "conn_ids": [],
