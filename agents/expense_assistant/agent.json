@@ -1,0 +1,9 @@
+{
+  "display_name": "経費アシスタント（移植準備中）",
+  "description": "経費相談・交通費候補・明細プレビューの共通業務契約。現在は業務ツールと本人認証が未接続。",
+  "allow_ask_human": false,
+  "memory_mode": "off",
+  "conn_ids": [],
+  "ext_api_ids": [],
+  "llm_model": null
+}

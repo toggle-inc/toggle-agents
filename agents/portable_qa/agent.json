@@ -1,0 +1,9 @@
+{
+  "display_name": "共通エージェント",
+  "description": "複数の会話入口から同じ本体を呼べるか、計算・短文作成・架空の質問で検証するエージェント。",
+  "allow_ask_human": false,
+  "memory_mode": "off",
+  "conn_ids": [],
+  "ext_api_ids": [],
+  "llm_model": null
+}
