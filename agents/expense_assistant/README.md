@@ -27,6 +27,8 @@
 - `tools.json` / `skills.json`：能力の宣言
 - `qa.json`：合成の検証ケース
 - `deploy.py`：このフォルダだけから配置パッケージを生成（通信なし）
+- `delivery.json`：本人専用配送の正本。SA/Buzz/Codexの個人チャットと論理接続能力の対応も保持
+- `runtime/delivery.py`：契約の検証・配送先種別の解決。秘密・環境固有IDは含めない
 - `test_deploy.py`：定義・単独コピー・生成物・誤設定拒否のテスト
 
 ## 検証とパッケージ作成

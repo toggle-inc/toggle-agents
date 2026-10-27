@@ -12,6 +12,10 @@ from runtime.service import ORIGINAL_TOOLS
 from runtime.state import ExpenseError
 
 DESCRIPTIONS = {
+    "delivery_contract": (
+        "Git正本の配送ルールとプラットフォーム別の非公開会話・接続能力の対応。"
+        "個人データは返さない。実接続の存在証明ではない。"
+    ),
     "mf_auth_url": "本人のMF OAuth連携を開始し許可URLを返す。トークンは返さない。",
     "mf_auth_complete": "本人のOAuth承認結果を保存する。秘密を回答や記憶に残さない。",
     "mf_offices": "認証した本人が所属する精算先会社の一覧。会社は必ず本人に確認する。",
@@ -43,7 +47,12 @@ def create_server(service):
     from mcp.server.mcpserver import MCPServer
 
     server = MCPServer("expense-assistant")
-    for name in ORIGINAL_TOOLS + ("expense_context", "propose_teaching", "read_reference"):
+    for name in ORIGINAL_TOOLS + (
+        "delivery_contract",
+        "expense_context",
+        "propose_teaching",
+        "read_reference",
+    ):
         method = getattr(service, name)
 
         def make_callback(operation, bound):

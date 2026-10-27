@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 spec = importlib.util.spec_from_file_location("agent_deploy", HERE / "deploy.py")
 deploy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(deploy)
@@ -53,9 +54,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(
                 manifest["test_scenarios"], [json.loads((copied / "qa.json").read_text())]
             )
-            self.assertEqual(
-                (output / "instructions.md").read_bytes(), (copied / "instructions.md").read_bytes()
-            )
+            self.assertEqual((output / "instructions.md").read_text(), deploy.load_definition()[1])
             self.assertEqual(
                 {p.name for p in output.iterdir()},
                 {
@@ -68,6 +67,7 @@ class DeploymentTests(unittest.TestCase):
                     "connect.py",
                     "requirements.txt",
                     "expense_preview.py",
+                    "delivery.json",
                 },
             )
             # Existing receipts/packages must never be replaced.
@@ -131,6 +131,13 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(manifest["conn_ids"], [456])
             self.assertEqual(json.loads((HERE / "agent.json").read_text())["conn_ids"], [])
             self.assertTrue((output / "runtime" / "service.py").is_file())
+            self.assertEqual(
+                (output / "delivery.json").read_bytes(), (HERE / "delivery.json").read_bytes()
+            )
+            self.assertIn(
+                '"result_audience": "authenticated_requester_only"',
+                (output / "instructions.md").read_text(),
+            )
 
 
 if __name__ == "__main__":

@@ -153,7 +153,12 @@ class ExpenseService:
         self._lock = threading.RLock()
 
     def call(self, operation, arguments):
-        operations = ORIGINAL_TOOLS + ("expense_context", "propose_teaching", "read_reference")
+        operations = ORIGINAL_TOOLS + (
+            "delivery_contract",
+            "expense_context",
+            "propose_teaching",
+            "read_reference",
+        )
         if operation not in operations or not isinstance(arguments, dict):
             raise ExpenseError("未対応の経費操作です。")
         method = getattr(self, operation)
@@ -679,6 +684,12 @@ class ExpenseService:
                 "teachings_cannot_override_safety",
             ],
         }
+
+    def delivery_contract(self):
+        """Static contract only; safe to inspect before any business-tool results."""
+        from .delivery import load_contract
+
+        return load_contract()
 
     def propose_teaching(self, kind, content, due_date=""):
         return self.state.propose_fact(kind, content, due_date)

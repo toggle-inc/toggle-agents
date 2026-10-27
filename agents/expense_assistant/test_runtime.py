@@ -671,6 +671,11 @@ class ProviderTests(unittest.TestCase):
                 result = asyncio.run(server.call_tool("mf_offices", {}))
                 self.assertFalse(result.is_error)
                 self.assertIn("架空商事A", str(result))
+                with patch.object(state, "facts", side_effect=AssertionError("private data read")):
+                    contract = asyncio.run(server.call_tool("delivery_contract", {}))
+                self.assertFalse(contract.is_error)
+                self.assertIn("authenticated_requester_only", str(contract))
+                self.assertIn("platform_bindings", str(contract))
             finally:
                 state.close()
 

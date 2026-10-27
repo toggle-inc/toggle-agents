@@ -6,6 +6,8 @@ import json
 import shutil
 from pathlib import Path
 
+from runtime.delivery import load_contract
+
 ROOT = Path(__file__).resolve().parent
 FIELDS = {
     "display_name",
@@ -39,6 +41,16 @@ def load_definition():
     instructions = (ROOT / "instructions.md").read_text(encoding="utf-8")
     if not instructions.strip():
         raise ValueError("instructions.md must not be empty")
+    contract = load_contract(ROOT)
+    instructions += (
+        "\n\n## Git正本の配送契約（配置時にdelivery.jsonから生成）\n"
+        + "以下は接続先に依存せず維持する配送要件です。"
+        "実行ホストがこの契約を満たすと確認できなければ、"
+        "個人情報を起点へ返さず保留してください。接続IDや本人IDをモデルが推測してはいけません。\n"
+        + "```json\n"
+        + json.dumps(contract, ensure_ascii=False, indent=2)
+        + "\n```\n"
+    )
     qa = json.loads((ROOT / "qa.json").read_text(encoding="utf-8"))
     if not isinstance(qa, dict) or set(qa) != {"instruction", "expected_outcome"}:
         raise ValueError("qa.json needs instruction and expected_outcome")
@@ -92,6 +104,7 @@ def build(tenant_id, output, agent_id=None, connection_ids=()):
             "connect.py",
             "requirements.txt",
             "expense_preview.py",
+            "delivery.json",
         ):
             shutil.copyfile(ROOT / name, output / name)
         (output / "agentize.managed-agent.json").write_text(
