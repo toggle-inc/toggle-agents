@@ -1,0 +1,16 @@
+name: Toggle Commit Policy Checker
+
+on:
+  pull_request:
+
+jobs:
+  prek:
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    uses: toggle-inc/toggle-commit-policy-checker/.github/workflows/toggle-commit-policy-checker-reusable.yml@30ffd79fc3acf23aa0e149d624c85f2a07b94a38 # v0.16.0
+    with:
+      shared-ref: main
+    secrets:
+      TOGGLE_GITHUB_ACTION: ${{ secrets.TOGGLE_GITHUB_ACTION }}
