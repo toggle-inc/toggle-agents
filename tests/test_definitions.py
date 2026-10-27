@@ -9,6 +9,15 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = {"agent.json", "instructions.md", "tools.json", "skills.json", "qa.json"}
 
 
+def source_files():
+    """Do not treat ignored build receipts or Python bytecode as definitions."""
+    for path in (ROOT / "agents").rglob("*"):
+        if path.is_file() and not {".deploy", "__pycache__", ".venv"}.intersection(
+            path.relative_to(ROOT / "agents").parts
+        ):
+            yield path
+
+
 class DefinitionTests(unittest.TestCase):
     def test_expected_agents(self):
         self.assertEqual(
@@ -66,7 +75,9 @@ class DefinitionTests(unittest.TestCase):
                 return set().union(*(keys(v) for v in value))
             return set()
 
-        for path in (ROOT / "agents").rglob("*.json"):
+        for path in source_files():
+            if path.suffix != ".json":
+                continue
             with self.subTest(file=str(path.relative_to(ROOT))):
                 self.assertFalse(keys(json.loads(path.read_text())) & forbidden)
 
@@ -77,11 +88,10 @@ class DefinitionTests(unittest.TestCase):
             r"sk-(?:proj-)?[A-Za-z0-9_-]{24,}",
             r"https://calendar\.google\.com/calendar/ical/",
         )
-        for path in (ROOT / "agents").rglob("*"):
-            if path.is_file():
-                for pattern in patterns:
-                    with self.subTest(file=str(path.relative_to(ROOT)), pattern=pattern):
-                        self.assertIsNone(re.search(pattern, path.read_text()))
+        for path in source_files():
+            for pattern in patterns:
+                with self.subTest(file=str(path.relative_to(ROOT)), pattern=pattern):
+                    self.assertIsNone(re.search(pattern, path.read_text(encoding="utf-8")))
 
 
 if __name__ == "__main__":
