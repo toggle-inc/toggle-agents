@@ -11,6 +11,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from runtime.connection import (  # noqa: E402
     LinkedMFClient,
+    configure_writes,
     connect,
     initialize_profile,
     read_settings,
@@ -48,6 +49,37 @@ class ConnectionTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_write_capability_toggle_preserves_binding_and_private_references(self):
+        profile = initialize_profile(self.env, self.private)
+        original = json.loads(profile.read_text())
+        token_before = self.token.read_bytes()
+        for enabled in (True, False):
+            configure_writes(profile, enabled)
+            changed = json.loads(profile.read_text())
+            self.assertEqual(changed, {**original, "write_enabled": enabled})
+            self.assertEqual(self.token.read_bytes(), token_before)
+            self.assertEqual(profile.stat().st_mode & 0o777, 0o600)
+            service = connect(profile)
+            try:
+                self.assertIs(service.write_enabled, enabled)
+            finally:
+                service.state.close()
+                service.mf.http.close()
+
+    def test_write_capability_rejects_invalid_owner_mode_and_symlink(self):
+        profile = initialize_profile(self.env, self.private)
+        before = profile.read_bytes()
+        with self.assertRaises(ExpenseError):
+            configure_writes(profile, "true")
+        link = self.private / "alias.json"
+        link.symlink_to(profile)
+        with self.assertRaises(ExpenseError):
+            configure_writes(link, True)
+        self.env.write_text(self.env.read_text().replace("synthetic-owner", "another-owner"))
+        with self.assertRaises(ExpenseError):
+            configure_writes(profile, True)
+        self.assertEqual(profile.read_bytes(), before)
 
     def test_settings_are_not_executed_or_interpolated(self):
         marker = self.root / "must-not-exist"

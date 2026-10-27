@@ -142,6 +142,39 @@ def initialize_profile(env_file, directory):
     return path
 
 
+def configure_writes(profile_path, enabled):
+    """Trusted local administrator action, never exposed as an agent tool.
+
+    This enables capability only; every financial write still requires its own
+    human-approved, expiring snapshot. Restart an existing stdio server afterward.
+    """
+    if type(enabled) is not bool:
+        raise ExpenseError("書き込み設定は真偽値で指定してください。")
+    path = Path(profile_path)
+    if path.is_symlink():
+        raise ExpenseError("接続プロファイルの参照先を確認してください。")
+    path = path.resolve()
+    service = connect(path)
+    try:
+        service.mf._load()  # Check the existing credential/owner binding without network writes.
+    finally:
+        service.state.close()
+        service.mf.http.close()
+    profile = json.loads(path.read_text())
+    profile["write_enabled"] = enabled
+    import tempfile
+
+    fd, temporary = tempfile.mkstemp(prefix=".connection-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(profile, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def connect(profile_path):
     path = Path(profile_path).resolve()
     if path.stat().st_mode & 0o077:

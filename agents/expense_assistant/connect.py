@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from runtime.connection import connect, initialize_profile
+from runtime.connection import configure_writes, connect, initialize_profile
 from runtime.state import ExpenseError
 
 
@@ -94,9 +94,29 @@ def main():
     check.add_argument("--fare-to", default="")
     serve = commands.add_parser("serve")
     serve.add_argument("--profile", type=Path, required=True)
+    writes = commands.add_parser(
+        "writes", help="Trusted local capability setting; not per-write approval"
+    )
+    writes.add_argument("--profile", type=Path, required=True)
+    mode = writes.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--enable", action="store_true")
+    mode.add_argument("--disable", action="store_true")
     args = parser.parse_args()
     service = None
     try:
+        if args.command == "writes":
+            configure_writes(args.profile, args.enable)
+            print(
+                json.dumps(
+                    {
+                        "write_enabled": args.enable,
+                        "per_write_human_approval_required": True,
+                        "mf_writes_performed": 0,
+                        "restart_existing_server": True,
+                    }
+                )
+            )
+            return
         if args.command == "setup":
             initialize_profile(args.legacy_env, args.directory)
             print(
