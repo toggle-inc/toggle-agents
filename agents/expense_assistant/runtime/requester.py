@@ -155,7 +155,8 @@ class RequesterDispatcher:
         with service._lock:
             return service._require(service.receipts, "領収書").payload(reference)
 
-    def _service(self, request_context, capability):
+    def validate_request(self, request_context):
+        """Trusted HTTP host's authentication gate; never register as a tool."""
         try:
             person = self._authenticate(request_context)
         except Exception:
@@ -169,6 +170,10 @@ class RequesterDispatcher:
             or not _unexpired(person.expires_at, now)
         ):
             raise ExpenseError("認証済みの依頼者を確認できません。")
+        return person
+
+    def _service(self, request_context, capability):
+        person = self.validate_request(request_context)
         try:
             grant = self._resolve(person, capability)
         except Exception:

@@ -43,7 +43,7 @@ DESCRIPTIONS = {
 }
 
 
-def create_server(service):
+def create_server(service, *, receipt_reader=None):
     from mcp.server.mcpserver import MCPServer
 
     server = MCPServer("expense-assistant")
@@ -97,12 +97,20 @@ def create_server(service):
 
         def make_resource(expected):
             def read(reference: str) -> bytes:
-                with service._lock:
-                    files = service._require(service.receipts, "領収書")
-                    payload = files.payload("receipt:" + reference)
+                from mcp.server.mcpserver.exceptions import ResourceError
+
+                try:
+                    if receipt_reader is None:
+                        with service._lock:
+                            files = service._require(service.receipts, "領収書")
+                            payload = files.payload("receipt:" + reference)
+                    else:
+                        payload = receipt_reader("receipt:" + reference)
                     if payload["content_type"] != expected:
                         raise ExpenseError("領収書の形式が一致しません。")
                     return base64.b64decode(payload["content"])
+                except ExpenseError as error:
+                    raise ResourceError(str(error)) from None
 
             return read
 
