@@ -120,6 +120,7 @@ class RuntimeTests(unittest.TestCase):
             state=self.state,
             policy=self.policy,
             receipts=self.files,
+            write_enabled=True,
             fares=Fares(
                 FakeFetch('<div id="route01">IC優先 321円 25分 乗換1回</div>'.encode(), "text/html")
             ),
@@ -220,6 +221,16 @@ class RuntimeTests(unittest.TestCase):
         preview = self.service.mf_create_transaction(**self.create)
         self.assertFalse(preview["created"])
         self.assertEqual(preview["form"]["fields"][0]["value"], "架空商事A")
+        with self.assertRaises(ExpenseError):
+            self.service.mf_create_transaction(
+                **self.create, confirm=True, preview_id=preview["preview_id"]
+            )
+        self.assertEqual(self.mf.writes, [])
+
+    def test_read_only_live_profile_blocks_even_a_trusted_approved_write(self):
+        self.service.write_enabled = False
+        preview = self.service.mf_create_transaction(**self.create)
+        self.approve(preview)
         with self.assertRaises(ExpenseError):
             self.service.mf_create_transaction(
                 **self.create, confirm=True, preview_id=preview["preview_id"]
@@ -479,6 +490,16 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result["routes"][0]["fare_yen"], 321)
         self.assertIn("transit.yahoo.co.jp", result["source_url"])
         self.assertEqual(Fares.parse_routes("広告 999円"), [])
+
+    def test_fare_comments_and_whitespace_do_not_select_commuter_pass_price(self):
+        page = (
+            '<div id="route01"><li>乗換：<span>0<!-- -->回</span></li>'
+            '<li class="fare">IC優先：<span>321<!-- -->円</span></li>'
+            "<div>定期券 1か月 9,999 円</div></div>"
+        )
+        result = Fares.parse_routes(page)
+        self.assertEqual(result[0]["fare_yen"], 321)
+        self.assertEqual(result[0]["transfers"], 0)
 
     def test_private_policy_is_hash_pinned_without_copying_it_to_public_source(self):
         path = self.root / "synthetic_policy.py"

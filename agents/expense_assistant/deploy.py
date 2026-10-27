@@ -86,7 +86,7 @@ def build(tenant_id, output, agent_id=None, connection_ids=()):
             output / "runtime",
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
-        for name in ("mcp_server.py", "requirements.txt", "expense_preview.py"):
+        for name in ("mcp_server.py", "connect.py", "requirements.txt", "expense_preview.py"):
             shutil.copyfile(ROOT / name, output / name)
         (output / "agentize.managed-agent.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

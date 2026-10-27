@@ -142,12 +142,14 @@ class ExpenseService:
         policy=None,
         aliases=None,
         references=None,
+        write_enabled=False,
     ):
         if getattr(mf, "owner", None) != state.owner:
             raise ExpenseError("MF認証と状態の本人が一致しません。")
         self.mf, self.state = mf, state
         self.calendar, self.fares, self.receipts, self.policy = calendar, fares, receipts, policy
         self.aliases, self.references = aliases or {}, references
+        self.write_enabled = write_enabled is True
         self._lock = threading.RLock()
 
     def call(self, operation, arguments):
@@ -376,6 +378,8 @@ class ExpenseService:
         if type(confirm) is not bool:
             raise ExpenseError("confirmは真偽値で指定してください。")
         if confirm:
+            if not self.write_enabled:
+                raise ExpenseError("この実接続は読み取り専用です。書き込みは別途承認が必要です。")
             if not preview_id:
                 raise ExpenseError("本人に示したプレビューと承認が必要です。")
             completed = self.state.completed(preview_id, action, company["id"], intent)
@@ -665,6 +669,7 @@ class ExpenseService:
                 "rules": self.policy is not None,
                 "submission": False,
                 "live_connection_verified": False,
+                "write_enabled": self.write_enabled,
             },
             "constraints": [
                 "human_approval_required",

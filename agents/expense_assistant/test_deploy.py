@@ -64,6 +64,7 @@ class DeploymentTests(unittest.TestCase):
                     "skills",
                     "runtime",
                     "mcp_server.py",
+                    "connect.py",
                     "requirements.txt",
                     "expense_preview.py",
                 },

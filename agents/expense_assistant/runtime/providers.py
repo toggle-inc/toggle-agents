@@ -428,9 +428,9 @@ class Fares:
         routes = []
         for block in re.split(r"id=[\"\']route0?\d+[\"\']", html)[1:4]:
             text = re.sub(r"\s+", " ", html_module.unescape(re.sub(r"<[^>]+>", " ", block[:6000])))
-            fare = re.search(r"(?:IC優先|運賃)\s*[：:]?\s*([\d,]+)円", text)
+            fare = re.search(r"(?:IC優先|運賃)\s*[：:]?\s*([\d,]+)\s*円", text)
             duration = re.search(r"(?:\d+時間)?\d+分", text)
-            transfers = re.search(r"乗換\s*[：:]?\s*(\d+)回", text)
+            transfers = re.search(r"乗換\s*[：:]?\s*(\d+)\s*回", text)
             if fare:
                 routes.append(
                     {
