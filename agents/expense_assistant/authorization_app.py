@@ -210,8 +210,8 @@ def create_app(authority, resolve, *, start_login=None, login_adapter=None, draf
                     + fields
                     + draft_fields
                     + '<button name="decision" value="approve">許可する</button>'
-                    '<button name="decision" value="deny">許可しない</button>'
-                    '<button name="decision" value="revoke">'
+                    '<button name="decision" value="deny" formnovalidate>許可しない</button>'
+                    '<button name="decision" value="revoke" formnovalidate>'
                     "既存の利用許可も解除する</button></form></html>"
                 )
             params = await _form(request)

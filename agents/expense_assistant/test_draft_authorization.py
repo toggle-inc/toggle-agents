@@ -136,6 +136,7 @@ class DraftAuthorizationTests(unittest.IsolatedAsyncioTestCase):
             reply = await self.decide(page, **kwargs)
             self.assertEqual(reply.status_code, 400, reply.text)
         page = await self.authorize(scope="mf:draft")
+        self.assertIn('value="deny" formnovalidate', page.text)
         denied = await self.decide(page, decision="deny")
         self.assertEqual(denied.status_code, 303)
         for service in self.services.values():
@@ -147,6 +148,7 @@ class DraftAuthorizationTests(unittest.IsolatedAsyncioTestCase):
     async def test_revoke_invalidates_both_oauth_and_company_draft_consent(self):
         pair = await self.consent_token()
         page = await self.authorize(scope="mf:draft")
+        self.assertIn('value="revoke" formnovalidate', page.text)
         revoked = await self.decide(page, decision="revoke")
         self.assertEqual(revoked.status_code, 303, revoked.text)
         with self.assertRaises(ExpenseError):
