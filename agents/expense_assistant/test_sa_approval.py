@@ -12,11 +12,36 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_runtime as fixtures  # noqa: E402
-from runtime.sa_approval import SAApprovalAdapter  # noqa: E402
+from runtime.sa_approval import SAApprovalAdapter, _json  # noqa: E402
 from runtime.state import ExpenseError, digest  # noqa: E402
 
 
 class SAApprovalTests(unittest.TestCase):
+    def test_display_payload_is_readable_deterministic_and_lossless(self):
+        value = {
+            "メモ": "架空の明細\n要確認",
+            "大きな識別子": 12345678901234567890,
+            "明細": {"金額": 321.12, "項目": ["架空A", "架空B"]},
+        }
+        rendered = _json(value)
+        self.assertIn("\n  ", rendered)
+        self.assertIn("架空の明細", rendered)
+        self.assertIn("12345678901234567890", rendered)
+        self.assertEqual(json.loads(rendered), value)
+        self.assertEqual(rendered, _json(dict(reversed(list(value.items())))))
+
+    def test_earlier_compact_display_approval_is_not_silently_reused(self):
+        self.propose()
+        self.decide()
+        row = self.rows[0]
+        row["payload"] = json.dumps(
+            json.loads(row["payload"]), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        row["contentDigest"] = hashlib.sha256(row["payload"].encode()).hexdigest()
+        with self.assertRaises(ExpenseError):
+            self.execute()
+        self.assertEqual(self.fixture.mf.writes, [])
+
     def setUp(self):
         self.fixture = fixtures.RuntimeTests(methodName="runTest")
         self.fixture.setUp()

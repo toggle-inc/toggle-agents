@@ -17,6 +17,9 @@ SAの画面・権限判定をここに複製せず、正本の明細内容を不
 - `propose(preview_id)` は本人用DBのsnapshotを読み、SAのapproval POSTへ送る。
   会社・操作・全明細・差分・出典・receipt参照を含む。画像バイト列だけはSHA256とサイズに
   置き換え、元の全snapshotは正本のpreview digestで束縛する。省略項目を推測で埋めない。
+  表示用JSONは正本側で2スペースの改行付きに整え、SAはその文字列をそのまま表示する。
+  数値・Unicode・全項目を保持し、ダイジェストも実際の表示bytesで照合する。
+  表示形式を変えた既存提案は上書きせず、新しいpreviewで本人確認をやり直す。
 - SAからのpreview/digest/expiry/payload/contentDigest/scopeと固定の確認画面パスを照合する。
   `propose`だけでは承認しない。
 - `execute_approved(preview_id, approval_id)` は実行直前にSAの承認記録をGETし、APPROVED・

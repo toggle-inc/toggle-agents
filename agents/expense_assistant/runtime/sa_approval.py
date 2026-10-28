@@ -36,9 +36,10 @@ OPERATIONS = {
 
 
 def _json(value):
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
-    )
+    # SA displays these exact bytes without reparsing. Indentation is owned by
+    # the agent so neither numbers nor hidden business fields are reformatted
+    # by a chat platform. This is not a new approval of an existing proposal.
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
 
 
 def _visible(value):
