@@ -672,6 +672,88 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(self.mf.writes), 1)
 
+    def _uploaded_for_status(self, result):
+        reference = self.files.save(b"%PDF-1.4\nsynthetic receipt", "application/pdf")["path"]
+        preview = self.service.mf_upload_receipt("office-a", reference)
+        self.approve(preview)
+        with patch.object(self.mf, "upload_receipt", return_value=result):
+            self.service.mf_upload_receipt("office-a", reference, True, preview["preview_id"])
+        return preview["preview_id"]
+
+    def test_ocr_status_follows_saved_ids_and_waits_until_input_done(self):
+        identifier = self._uploaded_for_status(
+            {
+                "ex_transactions": [{"id": "tx-a"}],
+                "mf_files": [{"id": "file-a"}],
+            }
+        )
+        row = self.mf.rows["office-a"][0]
+        row.update({"mf_file": {"id": "file-a"}, "automatic_status": "waiting_for_ocr_input"})
+        result = self.service.mf_receipt_status(identifier)
+        self.assertEqual(result["status"], "processing")
+        self.assertFalse(result["ocr_complete"])
+        row.update(
+            {"automatic_status": "input_done", "invoice_registration_number": "T0000000000000"}
+        )
+        result = self.service.mf_receipt_status(identifier)
+        self.assertTrue(result["ocr_complete"])
+        self.assertTrue(result["human_confirmation_required"])
+        self.assertEqual(result["transactions"][0]["invoice_registration_number"], "T0000000000000")
+        self.assertEqual(self.mf.writes, [])
+
+    def test_ocr_status_matches_file_not_amount_date_or_other_company(self):
+        identifier = self._uploaded_for_status({"mf_files": [{"id": "file-a"}]})
+        row = self.mf.rows["office-a"][0]
+        row.update({"mf_file": {"id": "file-other"}, "automatic_status": "input_done"})
+        self.mf.rows["office-b"] = [{**row, "mf_file": {"id": "file-a"}}]
+        result = self.service.mf_receipt_status(identifier)
+        self.assertEqual(result["status"], "awaiting_transaction")
+        self.assertEqual(result["transactions"], [])
+        row["mf_file"] = {"id": "file-a"}
+        self.assertTrue(self.service.mf_receipt_status(identifier)["ocr_complete"])
+
+    def test_ocr_status_no_saved_correlation_is_not_success(self):
+        identifier = self._uploaded_for_status({"accepted": True})
+        result = self.service.mf_receipt_status(identifier)
+        self.assertEqual(result["status"], "uncorrelated")
+        self.assertFalse(result["ocr_complete"])
+        self.assertEqual(result["transactions"], [])
+
+    def test_ocr_status_cancellation_error_or_unknown_status_never_complete(self):
+        identifier = self._uploaded_for_status({"ex_transactions": [{"id": "tx-a"}]})
+        row = self.mf.rows["office-a"][0]
+        for change in (
+            {"automatic_status": "canceled"},
+            {"automatic_status": "future-status"},
+            {"automatic_status": "input_done", "error_message": "synthetic failure"},
+        ):
+            row.update(change)
+            with self.subTest(change=change):
+                self.assertFalse(self.service.mf_receipt_status(identifier)["ocr_complete"])
+
+    def test_ocr_status_preview_only_never_uploads(self):
+        reference = self.files.save(b"%PDF-1.4\nsynthetic receipt", "application/pdf")["path"]
+        preview = self.service.mf_upload_receipt("office-a", reference)
+        result = self.service.call(
+            "mf_receipt_status", {"upload_preview_id": preview["preview_id"]}
+        )
+        self.assertEqual(result["status"], "not_submitted")
+        self.assertFalse(result["ocr_complete"])
+        self.assertEqual(self.mf.writes, [])
+
+    def test_ocr_status_rejects_mismatched_file_or_wrong_operation(self):
+        identifier = self._uploaded_for_status(
+            {
+                "ex_transactions": [{"id": "tx-a"}],
+                "mf_files": [{"id": "file-a"}],
+            }
+        )
+        with self.assertRaises(ExpenseError):
+            self.service.mf_receipt_status(identifier)
+        preview = self.service.mf_create_transaction(**self.create)
+        with self.assertRaises(ExpenseError):
+            self.service.mf_receipt_status(preview["preview_id"])
+
     def test_update_and_delete_are_previewed_approved_and_idempotent(self):
         change = {"office": "office-a", "transaction_id": "tx-a", "memo": "本人が直した経路"}
         preview = self.service.mf_update_transaction(**change)
@@ -1019,6 +1101,10 @@ class ProviderTests(unittest.TestCase):
                 tools = asyncio.run(server.list_tools())
                 names = {tool.name for tool in tools}
                 self.assertTrue(set(ORIGINAL_TOOLS).issubset(names))
+                receipt_status = next(tool for tool in tools if tool.name == "mf_receipt_status")
+                self.assertEqual(
+                    set(receipt_status.input_schema["properties"]), {"upload_preview_id"}
+                )
                 self.assertFalse({"approve", "accept_fact", "execute"} & names)
                 create = next(tool for tool in tools if tool.name == "mf_create_transaction")
                 self.assertIn("preview_id", create.input_schema["properties"])

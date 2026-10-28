@@ -24,6 +24,7 @@ OPERATIONS = {
             "mf_known_items",
             "mf_payee_memory",
             "mf_get_receipt",
+            "mf_receipt_status",
         ),
         "mf:read",
     ),
@@ -215,4 +216,5 @@ assert set(OPERATIONS) == set(ORIGINAL_TOOLS) | {
     "propose_teaching",
     "read_reference",
     "delivery_contract",
+    "mf_receipt_status",
 }

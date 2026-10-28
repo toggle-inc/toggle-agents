@@ -49,6 +49,9 @@ DM等の用語・論理的な接続能力の対応も正本のplatform_bindings�
   返された `resource_uri` はMCP対応入口で画像/PDFを読むために使える。OCRは `mf_upload_receipt` の承認後に依頼し、完了は明細で確認する。
   MFのOCRアップロードは単なる画像読取ではなく明細を作る可能性がある書き込みとして説明し、本人承認前には呼ばない。
   OCR受付を読取完了・登録完了と報告しない。OCRで作られた明細を照合してから補足し、同じ領収書で新規明細を二重に作らない。
+  承認したアップロードの `preview_id` を使い、`mf_receipt_status(upload_preview_id)` で関連する明細だけを読み直す。
+  `processing` / `awaiting_transaction` は処理待ち、`uncorrelated` / `unverified` / `outcome_unknown` は照合待ち。
+  同じ日付・金額だけで関連明細を決めない。`ocr_complete=true` でも科目・用途等は本人確認が必要で、提出完了ではない。
   登録番号は `invoice_registration_number` にTと半角数字13桁で渡し、本人確認用プレビューにも示す。
   形式検査だけを事業者の実在・登録有効性の確認と扱わない。印字不鮮明・候補競合時は推測で補わず本人に確認する。
   番号が不明な新規明細は空欄とし、更新時は引数省略なら既存値を維持する。空文字での削除も本人に示して再承認を得る。

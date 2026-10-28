@@ -35,6 +35,10 @@ DESCRIPTIONS = {
     ),
     "mf_update_transaction": "本人の未申請明細の修正。プレビューと別経路の本人承認が必要。",
     "mf_upload_receipt": "領収書OCR登録。プレビューと本人承認が必要。OCR完了は一覧で確認。",
+    "mf_receipt_status": (
+        "本人が承認した領収書OCRの確認IDからMFの関連明細と読取状態を照合する。"
+        "読み取り専用。受付だけで完了と扱わない。"
+    ),
     "mf_delete_transaction": "本人の未申請明細を削除。プレビューと本人承認が必要。",
     "expense_context": "最初に本人の教えと設定済み能力を読む。接続検証の成功を意味しない。",
     "propose_teaching": (
@@ -54,6 +58,7 @@ def create_server(service, *, receipt_reader=None, conversation_reader=None):
         "expense_context",
         "propose_teaching",
         "read_reference",
+        "mf_receipt_status",
     ):
         method = getattr(service, name)
 

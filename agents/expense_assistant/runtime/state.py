@@ -134,12 +134,12 @@ class State:
     def preview_details(self, identifier):
         """Trusted host only: exact private snapshot, never an LLM tool/resource."""
         row = self.db.execute(
-            "SELECT action,office,snapshot,hash,expires,status FROM previews WHERE id=?",
+            "SELECT action,office,snapshot,hash,expires,status,result FROM previews WHERE id=?",
             (identifier,),
         ).fetchone()
         if not row:
             raise ExpenseError("本人の確認対象が見つかりません。")
-        action, office, raw, hashed, expires, status = row
+        action, office, raw, hashed, expires, status, result = row
         snapshot = json.loads(raw)
         if (
             digest({"owner": self.owner, "action": action, "office": office, "snapshot": snapshot})
@@ -154,6 +154,7 @@ class State:
             "office": office,
             "snapshot": snapshot,
             "status": status,
+            "result": json.loads(result) if result else None,
         }
 
     @synchronized

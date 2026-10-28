@@ -45,6 +45,8 @@ def compact(transaction):
         "has_file": bool(transaction.get("mf_file")),
         "warning": transaction.get("warning_message") or transaction.get("error_message"),
         "invoice_registration_number": transaction.get("invoice_registration_number"),
+        "automatic_status": transaction.get("automatic_status"),
+        "receipt_file_id": (transaction.get("mf_file") or {}).get("id"),
     }
 
 
@@ -167,6 +169,7 @@ class ExpenseService:
             "expense_context",
             "propose_teaching",
             "read_reference",
+            "mf_receipt_status",
         )
         if operation not in operations or not isinstance(arguments, dict):
             raise ExpenseError("未対応の経費操作です。")
@@ -716,6 +719,99 @@ class ExpenseService:
         return self._write(
             "upload", company, intent, prepare, execute, confirm=confirm, preview_id=preview_id
         )
+
+    def mf_receipt_status(self, upload_preview_id):
+        """Read only: follow exact MF receipt/transaction IDs saved by an approved upload."""
+        details = self.state.preview_details(upload_preview_id)
+        if details["action"] != "upload":
+            raise ExpenseError("領収書OCRアップロードの確認IDを指定してください。")
+        company = self._office(details["office"])
+        base = {
+            "ocr_complete": False,
+            "human_confirmation_required": True,
+            "transactions": [],
+            "writes_performed": 0,
+        }
+        if details["status"] != "done":
+            return {
+                **base,
+                "status": "not_submitted" if details["status"] == "preview" else "outcome_unknown",
+            }
+        response = (details["result"] or {}).get("result")
+        if not isinstance(response, dict):
+            return {**base, "status": "uncorrelated"}
+
+        def identifiers(key):
+            rows = response.get(key, [])
+            if not isinstance(rows, list) or len(rows) > 20:
+                raise ExpenseError("OCR受付結果の対象を安全に照合できません。")
+            values = []
+            for row in rows:
+                identifier = row.get("id") if isinstance(row, dict) else None
+                if not isinstance(identifier, str) or not re.fullmatch(
+                    r"[A-Za-z0-9_-]{1,200}", identifier
+                ):
+                    raise ExpenseError("OCR受付結果の対象IDを確認できません。")
+                if identifier in values:
+                    raise ExpenseError("OCR受付結果の対象が重複しています。")
+                values.append(identifier)
+            return values
+
+        file_ids, transaction_ids = identifiers("mf_files"), identifiers("ex_transactions")
+        if transaction_ids:
+            rows = []
+            for identifier in transaction_ids:
+                result = self.mf.get_transaction(company["id"], identifier)
+                row = result.get("ex_transaction", result)
+                if not isinstance(row, dict) or row.get("id") != identifier:
+                    raise ExpenseError("OCRの明細を照合できません。")
+                rows.append(row)
+            if file_ids and any(
+                (row.get("mf_file") or {}).get("id") not in file_ids for row in rows
+            ):
+                raise ExpenseError("OCRの明細と領収書の対応を確認できません。")
+        elif file_ids:
+            rows = [
+                row
+                for row in self._transactions(company["id"])
+                if (row.get("mf_file") or {}).get("id") in file_ids
+            ]
+        else:
+            return {**base, "status": "uncorrelated"}
+        if not rows:
+            return {**base, "status": "awaiting_transaction"}
+        if len(rows) > 20 or len({row.get("id") for row in rows}) != len(rows):
+            raise ExpenseError("OCRの関連明細を一意に照合できません。")
+        states = {row.get("automatic_status") for row in rows}
+        if (
+            any(row.get("error_message") or row.get("warning_message") for row in rows)
+            or "canceled" in states
+        ):
+            status = "needs_review"
+        elif file_ids and not set(file_ids).issubset(
+            {(row.get("mf_file") or {}).get("id") for row in rows}
+        ):
+            status = "awaiting_transaction"
+        elif states == {"input_done"}:
+            status = "input_complete"
+        elif states.issubset(
+            {
+                "waiting_for_ocr_input",
+                "waiting_for_streamed_upload",
+                "waiting_for_streamed_input",
+                "waiting_for_input",
+                "input_done",
+            }
+        ):
+            status = "processing"
+        else:
+            status = "unverified"
+        return {
+            **base,
+            "status": status,
+            "ocr_complete": status == "input_complete",
+            "transactions": [compact(row) for row in rows],
+        }
 
     def mf_delete_transaction(self, office, transaction_id, confirm=False, preview_id=""):
         company = self._office(office)
