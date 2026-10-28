@@ -250,6 +250,98 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(self.mf.writes), 1)
 
+    def test_invoice_create_is_shown_bound_to_approval_and_read_back(self):
+        arguments = {**self.create, "invoice_registration_number": "T0000000000000"}
+        preview = self.service.mf_create_transaction(**arguments)
+        self.assertEqual(self.mf.writes, [])
+        field = next(
+            row for row in preview["form"]["fields"] if row["key"] == "invoice_registration_number"
+        )
+        self.assertEqual(field["value"], arguments["invoice_registration_number"])
+        self.assertEqual(preview["preview"]["invoice_registration_number"], field["value"])
+        self.approve(preview)
+        with self.assertRaises(ExpenseError):
+            self.service.mf_create_transaction(
+                **{**arguments, "invoice_registration_number": "T0000000000001"},
+                confirm=True,
+                preview_id=preview["preview_id"],
+            )
+        self.assertEqual(self.mf.writes, [])
+        result = self.service.mf_create_transaction(
+            **arguments, confirm=True, preview_id=preview["preview_id"]
+        )
+        self.assertEqual(result["transaction"]["invoice_registration_number"], field["value"])
+        self.assertEqual(self.mf.writes[0][2]["invoice_registration_number"], field["value"])
+
+    def test_invoice_update_can_set_preserve_or_explicitly_clear(self):
+        for number in ("T0000000000000", ""):
+            arguments = {
+                "office": "office-a",
+                "transaction_id": "tx-a",
+                "invoice_registration_number": number,
+            }
+            preview = self.service.mf_update_transaction(**arguments)
+            self.assertEqual(preview["preview"]["invoice_registration_number"], number)
+            self.approve(preview)
+            result = self.service.mf_update_transaction(
+                **arguments, confirm=True, preview_id=preview["preview_id"]
+            )
+            self.assertEqual(result["transaction"]["invoice_registration_number"], number)
+        preview = self.service.mf_update_transaction("office-a", "tx-a", memo="架空の補足")
+        self.assertNotIn("invoice_registration_number", preview["preview"])
+
+    def test_invoice_update_cannot_change_after_approval(self):
+        arguments = {
+            "office": "office-a",
+            "transaction_id": "tx-a",
+            "invoice_registration_number": "T0000000000000",
+        }
+        preview = self.service.mf_update_transaction(**arguments)
+        self.approve(preview)
+        with self.assertRaises(ExpenseError):
+            self.service.mf_update_transaction(
+                **{**arguments, "invoice_registration_number": ""},
+                confirm=True,
+                preview_id=preview["preview_id"],
+            )
+        self.assertEqual(self.mf.writes, [])
+
+    def test_malformed_invoice_numbers_do_not_produce_a_write_preview(self):
+        for number in (
+            "T123",
+            "t0000000000000",
+            "T０００００００００００００",
+            123,
+            True,
+            "T0000000000000\n",
+            " T0000000000000",
+        ):
+            with self.subTest(number=number):
+                with self.assertRaises(ExpenseError):
+                    self.service.mf_create_transaction(
+                        **self.create, invoice_registration_number=number
+                    )
+                with self.assertRaises(ExpenseError):
+                    self.service.mf_update_transaction(
+                        "office-a", "tx-a", invoice_registration_number=number
+                    )
+        self.assertEqual(self.mf.writes, [])
+
+    def test_guessed_invoice_number_keeps_form_unready(self):
+        arguments = {
+            **self.create,
+            "invoice_registration_number": "T0000000000000",
+            "sources": {"invoice_registration_number": "領収書の印字不鮮明・要確認"},
+        }
+        preview = self.service.mf_create_transaction(**arguments)
+        self.assertFalse(preview["form"]["ready"])
+        self.approve(preview)
+        with self.assertRaises(ExpenseError):
+            self.service.mf_create_transaction(
+                **arguments, confirm=True, preview_id=preview["preview_id"]
+            )
+        self.assertEqual(self.mf.writes, [])
+
     def test_approval_cannot_change_company_amount_policy_or_expiry(self):
         for field in ("company", "amount", "policy", "expiry"):
             with self.subTest(field=field):
@@ -668,6 +760,12 @@ class ProviderTests(unittest.TestCase):
                 create = next(tool for tool in tools if tool.name == "mf_create_transaction")
                 self.assertIn("preview_id", create.input_schema["properties"])
                 self.assertNotIn("owner", create.input_schema["properties"])
+                self.assertEqual(
+                    create.input_schema["properties"]["invoice_registration_number"]["type"],
+                    "string",
+                )
+                update = next(tool for tool in tools if tool.name == "mf_update_transaction")
+                self.assertIn("invoice_registration_number", update.input_schema["properties"])
                 result = asyncio.run(server.call_tool("mf_offices", {}))
                 self.assertFalse(result.is_error)
                 self.assertIn("架空商事A", str(result))

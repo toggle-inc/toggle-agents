@@ -44,6 +44,7 @@ def compact(transaction):
         "in_report": bool(transaction.get("ex_report")),
         "has_file": bool(transaction.get("mf_file")),
         "warning": transaction.get("warning_message") or transaction.get("error_message"),
+        "invoice_registration_number": transaction.get("invoice_registration_number"),
     }
 
 
@@ -61,6 +62,13 @@ def amount(value, *, allow_zero=False):
     return int(number) if number == int(number) else float(number)
 
 
+def invoice_number(value):
+    """Validate transcription shape only, not issuer registration or tax eligibility."""
+    if not isinstance(value, str) or (value and not re.fullmatch(r"T[0-9]{13}", value)):
+        raise ExpenseError("登録番号はTと半角数字13桁で指定し、不明なら空欄にしてください。")
+    return value
+
+
 def form(office, fields, *, warnings, sources, item_options, receipt=""):
     """A neutral draft UI contract; renderers never authorize a write by themselves."""
     meal = any(
@@ -76,6 +84,7 @@ def form(office, fields, *, warnings, sources, item_options, receipt=""):
         ("ex_item_name", "経費科目", "select", True),
         ("report_number", "事前申請番号", "text", False),
         ("memo", "メモ", "text_long", transit),
+        ("invoice_registration_number", "適格請求書発行事業者登録番号", "text", False),
     ]
     if meal:
         definitions += [
@@ -423,6 +432,7 @@ class ExpenseService:
         sources=None,
         ex_item_options=None,
         preview_id="",
+        invoice_registration_number="",
     ):
         company = self._office(office)
         intent = {
@@ -432,6 +442,7 @@ class ExpenseService:
         }
 
         def prepare():
+            invoice_number(invoice_registration_number)
             parsed_date = dt.date.fromisoformat(recognized_at)
             if (
                 parsed_date
@@ -465,6 +476,7 @@ class ExpenseService:
                         ("report_number", report_number),
                         ("project_id", project_id),
                         ("dept_id", dept_id),
+                        ("invoice_registration_number", invoice_registration_number),
                     )
                     if val
                 }
@@ -493,6 +505,7 @@ class ExpenseService:
                 "other_count": other_count,
                 "own_names": own_names,
                 "other_names": other_names,
+                "invoice_registration_number": invoice_registration_number,
             }
             shown = {key: val for key, val in payload.items() if key != "receipt_input"}
             if receipt_path:
@@ -549,6 +562,7 @@ class ExpenseService:
         receipt_path="",
         confirm=False,
         preview_id="",
+        invoice_registration_number=None,
     ):
         company = self._office(office)
         intent = {
@@ -558,6 +572,8 @@ class ExpenseService:
         }
 
         def prepare():
+            if invoice_registration_number is not None:
+                invoice_number(invoice_registration_number)
             before = self._editable(company["id"], transaction_id)
             payload = {
                 key: val
@@ -567,6 +583,7 @@ class ExpenseService:
                     ("memo", memo),
                     ("report_number", report_number),
                     ("project_id", project_id),
+                    ("invoice_registration_number", invoice_registration_number),
                 )
                 if val is not None
             }
