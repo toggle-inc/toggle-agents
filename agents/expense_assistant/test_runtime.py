@@ -34,6 +34,7 @@ class FakeMF:
             "office-a": [
                 {
                     "id": "tx-a",
+                    "automatic_status": "manual",
                     "recognized_at": "2030-01-15",
                     "value": 321,
                     "remark": "架空の訪問先",
@@ -69,7 +70,7 @@ class FakeMF:
         self.writes.append(("create", office, copy.deepcopy(payload)))
         if self.fail_write:
             raise OutcomeUnknownError("synthetic unknown outcome")
-        row = {**payload, "id": "synthetic-created"}
+        row = {**payload, "id": "synthetic-created", "automatic_status": "manual"}
         if payload.get("receipt_input"):
             row["mf_file"] = {"id": "synthetic-file"}
         self.rows[office].append(row)
@@ -753,6 +754,30 @@ class RuntimeTests(unittest.TestCase):
         preview = self.service.mf_create_transaction(**self.create)
         with self.assertRaises(ExpenseError):
             self.service.mf_receipt_status(preview["preview_id"])
+
+    def test_ocr_processing_unknown_and_canceled_rows_cannot_be_edited_or_deleted(self):
+        row = self.mf.rows["office-a"][0]
+        for status in (
+            "waiting_for_ocr_input",
+            "waiting_for_streamed_upload",
+            "waiting_for_input",
+            "waiting_for_streamed_input",
+            "canceled",
+            "future-status",
+            None,
+        ):
+            row["automatic_status"] = status
+            with self.subTest(status=status):
+                with self.assertRaises(ExpenseError):
+                    self.service.mf_update_transaction("office-a", "tx-a", memo="架空補正")
+                with self.assertRaises(ExpenseError):
+                    self.service.mf_delete_transaction("office-a", "tx-a")
+        row.pop("automatic_status")
+        with self.assertRaises(ExpenseError):
+            self.service.mf_update_transaction("office-a", "tx-a", memo="架空補正")
+        with self.assertRaises(ExpenseError):
+            self.service.mf_delete_transaction("office-a", "tx-a")
+        self.assertEqual(self.mf.writes, [])
 
     def test_update_and_delete_are_previewed_approved_and_idempotent(self):
         change = {"office": "office-a", "transaction_id": "tx-a", "memo": "本人が直した経路"}

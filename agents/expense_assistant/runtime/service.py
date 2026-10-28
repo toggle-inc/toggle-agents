@@ -214,6 +214,13 @@ class ExpenseService:
             raise ExpenseError("本人の対象明細を確認できません。")
         if matches[0].get("ex_report"):
             raise ExpenseError("申請に含まれている明細は変更・削除しません。")
+        if matches[0].get("automatic_status") not in {
+            "manual",
+            "input_done",
+        }:
+            raise ExpenseError(
+                "OCR処理中または状態未確認の明細は変更・削除せず、読取結果を待って確認します。"
+            )
         return matches[0]
 
     def _require(self, provider, name):
