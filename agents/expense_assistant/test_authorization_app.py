@@ -182,6 +182,61 @@ class AuthorizationAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.decide(page, "bob")).status_code, 400)
         self.assertEqual((await self.decide(page, "alice")).status_code, 303)
 
+    async def test_unauthenticated_authorize_starts_host_login_and_preserves_request(self):
+        observed = {}
+
+        async def start_login(request):
+            observed["url"] = str(request.url)
+            from starlette.responses import RedirectResponse
+
+            return RedirectResponse("https://sso.example.test/login?state=opaque", status_code=303)
+
+        app = create_app(self.authority, lambda *_: None, start_login=start_login)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=self.authority.issuer
+        )
+        self.addAsyncCleanup(client.aclose)
+        params = {
+            "response_type": "code",
+            "client_id": "sa",
+            "redirect_uri": "https://sa.example.test/callback",
+            "resource": self.authority.resource,
+            "scope": "mf:read",
+            "code_challenge": CHALLENGE,
+            "code_challenge_method": "S256",
+            "state": "synthetic-state",
+        }
+        response = await client.get("/oauth/authorize", params=params)
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "https://sso.example.test/login?state=opaque")
+        preserved = urlsplit(observed["url"])
+        self.assertEqual(preserved.path, "/oauth/authorize")
+        self.assertEqual(parse_qs(preserved.query)["state"], ["synthetic-state"])
+        self.assertEqual(parse_qs(preserved.query)["redirect_uri"], [params["redirect_uri"]])
+
+    async def test_missing_login_on_consent_does_not_restart_sso_or_replay_post(self):
+        started = []
+
+        def start_login(request):
+            started.append(request.url.path)
+            from starlette.responses import RedirectResponse
+
+            return RedirectResponse("https://sso.example.test/login")
+
+        app = create_app(self.authority, lambda *_: None, start_login=start_login)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=self.authority.issuer
+        )
+        self.addAsyncCleanup(client.aclose)
+        page = await self.authorize()
+        response = await client.post(
+            "/oauth/consent",
+            data={**FormParser(page.text).fields, "decision": "approve"},
+            headers={"origin": self.authority.issuer},
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(started, [])
+
     @with_server
     async def test_origin_nonce_and_replay_protection(self):
         page = await self.authorize()

@@ -81,6 +81,38 @@ Harnessの `_sa_oauth_connection_blockers` には未認可・不足スコープ�
 ただし、これだけでMFの個人認証や本ディスパッチへの本人情報の受け渡しが完成するわけではない。
 既存の共有資格情報／一時資格情報の経路を本人認可と混同しない。
 
+### SAからの本人別接続契約
+
+1. SAで認証された社員が「連携して実行」を選ぶ。SAは対象tenant・SA employee・connectionに束縛した
+   一度限りの接続ticketをEngineへ渡し、Engineの `/sa-oauth/connect/{connection_id}` が使用する。
+2. Engineはその社員専用のOAuth認可フローを開始し、agentのProtected Resource Metadataから認可サーバーを
+   発見する。認可リクエストには登録済み `client_id`、Engine callbackの固定 `redirect_uri`、
+   `state`、PKCE S256、`resource`、要求能力を含める。
+3. 未ログインならagent配置の `start_login` アダプタが会社SSOへ送り、署名付きstateを検証して
+   同じ認可URLへ戻す。`verify_login` が検証済みのtenantとcanonical personを返した後、本人に
+   操作能力を表示してagent利用への同意を求める。本人の許可後、agentは一度限りのコードと元のstateを
+   Engine callbackへ返す。SSOログインとagent利用許可は別々の操作。
+4. Engineはcallbackのstate・redirect URI・PKCEを検証し、発行されたagent resource tokenを
+   `tenant + SA employee + connection` の per-user tokenとして保存する。共有tokenや他社員の行を
+   フォールバックに使わない。SA employee IDはEngineの内部主体であり、現在のagent OAuth仕様では
+   agentへ転送されない。
+5. よって、agentのSSO personとSA employeeの同一人物性を、会社の信頼できる本人対応表または
+   署名済み本人連携で確認できるまで、接続を利用可能にしてはならない。メールアドレス一致、
+   SAのtenant-wide credential、モデルの申告で紐付けない。紐付け不能なら認可・本人別service解決を
+   拒否して管理者に対応を依頼する。
+6. 以後Engineは、呼出元SA社員のper-user tokenを短命access/refresh tokenとして維持し、agent MCPへ
+   Bearerで送る。agentはtokenに束縛されたpersonを検証し、その人のサービス同意・MF credentialを
+   毎回解決する。MF OAuth refreshはEngineのagent-token refreshとは別の系列であり、agent側の
+   本人専用secret storeで行う。どちらかが失効・解除されたら該当リクエストを止めて再接続を促す。
+
+Money Forwardのクラウド経費APIは、利用者がMFIDでログインしてアプリを認可したユーザー権限で
+tokenを発行する。MF側にはクラウド経費ごとのOAuthアプリ登録とclient secretが必要であり、
+refreshでは新しいaccess/refresh tokenが返る。MF client secretは配置側の秘密として保持し、社員へ
+入力させない。MF公式の[OAuth/API手順](https://github.com/moneyforward/expense-api-doc) と
+[認可エンドポイント](https://developers.biz.moneyforward.com/docs/api/auth/authorize/)、
+[トークンエンドポイント](https://developers.biz.moneyforward.com/docs/api/auth/create-token/)を参照。
+この確認は仕様資料の照合であり、MFアプリ登録・権限・実ユーザーのOAuth往復成功を意味しない。
+
 ## 次の統合段階
 
 1. エージェント所有の認証サービスへ、実会社SSOの検証アダプタと秘密保管先を設定する。
