@@ -107,9 +107,10 @@ Harnessの `_sa_oauth_connection_blockers` には未認可・不足スコープ�
 
 ### Okta OIDC login adapter
 
-会社SSOはOkta OIDCを使う。ホストの `start_login` / `verify_login` adapterはAuthorization Code flow
-（confidential web client）で構成し、PKCE S256も有効にする。Okta issuer、client ID、許可済みcallback URI
-は環境設定から固定し、任意のissuerやcallbackをリクエスト値から組み立てない。
+会社SSOはOkta OIDCを使う。`runtime/okta_oidc.py` にAuthorization Code flow
+（confidential web client）とPKCE S256のadapterを実装し、`create_app(..., login_adapter=okta)` で接続する。
+Okta issuer、client ID、client secret、許可済みcallback URIは配置設定から固定し、任意のissuerやcallbackを
+リクエスト値から組み立てない。private storeの暗号鍵には専用のSecret Manager secretを使う。
 
 - 開始時に暗号学的乱数の `state`、`nonce`、PKCE verifierを作り、短時間・一回限りのprivate storeに保存する。
   元の `/oauth/authorize` URLもこのstateレコードに結び付け、queryやcookieの未署名`return_to`は使わない。
@@ -119,12 +120,13 @@ Harnessの `_sa_oauth_connection_blockers` には未認可・不足スコープ�
   `email`、表示名、部署、SA employee IDを使った自動紐付け・自己登録は禁止する。未リンクは拒否する。
 - ログイン後はランダムなserver-side session IDのみを`Secure; HttpOnly; SameSite=Lax` cookieで渡す。
   sessionは期限・tenant・canonical personに束縛し、logout/期限切れで失効させる。tokenやID tokenをcookieに入れない。
-- client secret、session/state signing key、Okta tokenはSecret Manager等のprivate secret storeで管理し、
+- client secret、session state encryption key、Okta tokenはSecret Manager等のprivate secret storeで管理し、
   public MCP runtimeへOkta client secretを渡さない。IdP callbackでは任意の同意POSTを再送せず、
   認証後に元の認可GETを再開して同意画面を表示する。
 
-これは配置用adapterの要件であり、Okta org・app・callback URI・secret・常設hostの設定完了を意味しない。
-実際のSSO成功は、承認済みOkta appと固定HTTPS hostを結び、ログイン・logout・未リンク拒否を実機で確認してから扱う。
+adapterと合成テストは実装済み。Cloud Runには別サービス用のOkta secret参照とcallback設定が見つかったが、
+今回のhost/redirect URIと一致するとは確認していない。Okta app登録変更、pilot用identity link、
+専用store/secret/IAM、expense assistant用hostの接続後、ログイン・logout・未リンク拒否を実機確認する。
 
 ### 実ホストのscope→owner binding
 
@@ -193,13 +195,11 @@ adapterを分離し、現在ユーザーのprocess-global cacheを使わない�
 - 失効hookはEngineのper-user token revokeとagent consent revokeを同期する。MF同意取消・token refresh
   失敗・canonical link停止も毎回のresolverで拒否し、再認証/再リンクを促す。
 
-実接続を始めるには、少なくとも次の判断・アクセスが必要になる。
-①pilotの正確なtenant/managed-agent/versionと、社員→SSO canonical IDの対応を承認、
-②会社SSOのlogin/callback検証に必要な最小権限、
-③上記API操作だけに限定したSA Preview credential、
-④既存MF OAuth appの再利用可否（不可ならclient secretの新規発行）、
-⑤固定HTTPS host、永続DB、Secret Managerに対する専用runtime IAM。
-これらはDraft PRや合成テストの承認には含まれず、設定前にそれぞれ対象を絞って確認する。
+ユーザーはpilot tenant 10 / managed agent 1000312 / version 4、Oktaの利用、最小SA API操作、
+必要な専用host/store/secret/IAM設定を承認済み。承認済みの範囲で実装・配置準備を進める。
+本番接続を有効化するには、会社が管理するSA employee→Okta subject→canonical personの明示link、
+Okta appの今回のcallback URI登録、必要なcredentialのSecret Manager登録、private runtime IAMと
+永続storeの構成が必要。既存の `ai-corp-mcp` 用Okta app/hostは別用途のため、そのまま転用しない。
 
 Money Forwardのクラウド経費APIは、利用者がMFIDでログインしてアプリを認可したユーザー権限で
 tokenを発行する。MF側にはクラウド経費ごとのOAuthアプリ登録とclient secretが必要であり、
@@ -211,7 +211,7 @@ refreshでは新しいaccess/refresh tokenが返る。MF client secretは配置�
 
 ## 次の統合段階
 
-1. エージェント所有の認証サービスへ、実会社SSOの検証アダプタと秘密保管先を設定する。
+1. エージェント所有の認証サービスへ、Okta adapter、private store/secret、明示identity-link resolverを設定する。
    Engineには既存の外部MCP OAuth経路があり、Harnessはユーザー別に解決したBearerをMCPへ渡す。
    Engine内部の本人IDが自動的に外部MCPへ渡るわけではない。
    経費固有の認証・同意・トークン発行をEngineへ移さない。Engineは利用先の一つとして設定する。

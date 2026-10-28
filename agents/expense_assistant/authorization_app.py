@@ -89,7 +89,7 @@ class _PrivateHTTPS:
         return await self.app(scope, receive, private_send)
 
 
-def create_app(authority, resolve, *, start_login=None):
+def create_app(authority, resolve, *, start_login=None, login_adapter=None):
     """Host supplies SSO verification + private storage/providers, not auth logic.
 
     The configured verify_login(Request) adapter must verify its own secure SSO
@@ -102,6 +102,16 @@ def create_app(authority, resolve, *, start_login=None):
     if not isinstance(authority, AgentAuthorization):
         raise ValueError("Agent-owned authority is required")
     origin = authority.issuer
+    if login_adapter is not None:
+        if start_login is not None:
+            raise ValueError("Configure either login_adapter or start_login, not both")
+        if (
+            login_adapter.tenant_id != authority.tenant_id
+            or login_adapter.callback_uri != origin + "/login/callback"
+            or authority.verify_login != login_adapter.verify_login
+        ):
+            raise ValueError("Okta adapter tenant, session verifier, and fixed callback must match")
+        start_login = login_adapter.start_login
     dispatcher = RequesterDispatcher(authority.authenticate, resolve, clock=authority.clock)
     mcp = create_mcp(dispatcher, urlsplit(origin).hostname)
 
@@ -252,5 +262,12 @@ def create_app(authority, resolve, *, start_login=None):
             ("/oauth/revoke", ["POST"]),
         )
     ]
+    if login_adapter is not None:
+        routes.extend(
+            (
+                Route("/login/callback", login_adapter.callback, methods=["GET"]),
+                Route("/logout", login_adapter.logout, methods=["POST"]),
+            )
+        )
     routes.append(Mount("/", app=mcp))
     return _PrivateHTTPS(Starlette(routes=routes, lifespan=lifespan), origin)
