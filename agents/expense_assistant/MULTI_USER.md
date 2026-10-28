@@ -105,6 +105,27 @@ Harnessの `_sa_oauth_connection_blockers` には未認可・不足スコープ�
    毎回解決する。MF OAuth refreshはEngineのagent-token refreshとは別の系列であり、agent側の
    本人専用secret storeで行う。どちらかが失効・解除されたら該当リクエストを止めて再接続を促す。
 
+### Okta OIDC login adapter
+
+会社SSOはOkta OIDCを使う。ホストの `start_login` / `verify_login` adapterはAuthorization Code flow
+（confidential web client）で構成し、PKCE S256も有効にする。Okta issuer、client ID、許可済みcallback URI
+は環境設定から固定し、任意のissuerやcallbackをリクエスト値から組み立てない。
+
+- 開始時に暗号学的乱数の `state`、`nonce`、PKCE verifierを作り、短時間・一回限りのprivate storeに保存する。
+  元の `/oauth/authorize` URLもこのstateレコードに結び付け、queryやcookieの未署名`return_to`は使わない。
+- callbackではstateを原子的に一回だけ消費し、authorization codeを固定redirect URIとverifierで交換する。
+  ID tokenの署名をdiscovery documentのJWKSで検証し、`iss`、`aud`、`exp`、`iat`、`nonce`を検証する。
+- Oktaの安定した`sub`とissuerを外部主体キーにし、tenant内の明示済みidentity linkからcanonical personを解決する。
+  `email`、表示名、部署、SA employee IDを使った自動紐付け・自己登録は禁止する。未リンクは拒否する。
+- ログイン後はランダムなserver-side session IDのみを`Secure; HttpOnly; SameSite=Lax` cookieで渡す。
+  sessionは期限・tenant・canonical personに束縛し、logout/期限切れで失効させる。tokenやID tokenをcookieに入れない。
+- client secret、session/state signing key、Okta tokenはSecret Manager等のprivate secret storeで管理し、
+  public MCP runtimeへOkta client secretを渡さない。IdP callbackでは任意の同意POSTを再送せず、
+  認証後に元の認可GETを再開して同意画面を表示する。
+
+これは配置用adapterの要件であり、Okta org・app・callback URI・secret・常設hostの設定完了を意味しない。
+実際のSSO成功は、承認済みOkta appと固定HTTPS hostを結び、ログイン・logout・未リンク拒否を実機で確認してから扱う。
+
 ### 実ホストのscope→owner binding
 
 PR #4の `SAApprovalAdapter` / `SAAttachmentAdapter` は、毎回のhost callback
