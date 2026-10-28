@@ -105,6 +105,81 @@ Harnessの `_sa_oauth_connection_blockers` には未認可・不足スコープ�
    毎回解決する。MF OAuth refreshはEngineのagent-token refreshとは別の系列であり、agent側の
    本人専用secret storeで行う。どちらかが失効・解除されたら該当リクエストを止めて再接続を促す。
 
+### 実ホストのscope→owner binding
+
+PR #4の `SAApprovalAdapter` / `SAAttachmentAdapter` は、毎回のhost callback
+`verify_scope(scope, owner)` が `True` を返すことを要求する。認証ブランチの
+`runtime/sa_identity.py` にある `verify_sa_scope(...)` は、このcallbackに渡せる検査部品である。
+これはSA署名やログインcookieを検証しない。ホストの `verify_invocation(scope, origin)` が、
+固定HTTPSのSA originで最新かつ有効な実行scopeを確認し、scope全体を保持した
+`VerifiedSAInvocation` を返した場合だけ利用する。
+
+この検査はscopeの全フィールド（tenant、requester employee、run、harness session、
+managed agentとversion、invocation、source/root message、channel）をSAで確認した値と照合する。
+ホストは別途、`(tenantId, requesterEmployeeId)` の明示的な本人リンクを解決し、そのcanonical
+person IDを `AgentAuthorization.verify_login` と `RequesterDispatcher` の両方で使う。
+`verify_sa_scope` はその人の `Requester.owner` を計算し、本人用serviceのownerと一致しなければ拒否する。
+リンクは会社SSO subjectまたは同等の認証済みaccount-link手順で作り、email一致から自動生成しない。
+ID・scope・権限の検証は各approval/attachment操作前に新しく行い、結果をcacheしない。
+
+```python
+from runtime.sa_identity import verify_sa_scope
+
+def scope_belongs_to_service(scope, owner):
+    return verify_sa_scope(
+        scope,
+        owner,
+        verify_invocation=sa_gateway.verify_current_invocation,
+        resolve_person=identity_links.resolve_sa_employee,
+        origin=SA_ORIGIN,
+    )
+```
+
+`sa_gateway` は配置先の認証済みクライアントであり、実装時に署名・issuer・audience・期限・
+tenant・employee・run・session・version・origin/source・現在の権限を検証してから
+`VerifiedSAInvocation` を返す。`identity_links` は会社が管理する明示リンクを読む。
+未リンク・不明issuer・期限切れ・run変更・権限取り消し・外部API失敗はすべて拒否する。
+`scope` の元値はSAの認証済みrequest contextから渡し、本文・添付OCR・model tool argsから作らない。
+
+SA service credentialはこのtrusted hostからSAのapproval/attachment APIへ出す認証専用である。
+agentのMCP OAuth client、本人別MF token、EngineがMCPへ送るper-user Bearerとは別に保管する。
+個人用MCP endpointへSA credentialを渡さず、レスポンス・tool引数・ログにも出さない。
+ホストは短命Bearerを本人ごとに解決するMCP adapterと、内部でSA APIを呼ぶapproval/attachment
+adapterを分離し、現在ユーザーのprocess-global cacheを使わない。
+
+### 月末pilotの最小配置条件
+
+- 外部から到達できる固定HTTPS issuerで `authorization_app` と `/mcp` を稼働し、Engineの登録済み
+  OAuth client/callbackと一致させる。ローカルPCや一時Preview tunnelを接続先にしない。
+- `AgentAuthorization` のcode/consent/family recordsは、複数worker間で原子的なtransactionが
+  できる永続private storeへ保存する。単一workerのpilotなら専用永続volume上のprivate SQLiteを使える。
+  scale-to-zero/一時filesystemならSQLiteを使わず、durable transactional DB adapterを用意する。
+- 会社SSOの `start_login` / `verify_login` と、SA employee→canonical personの明示link tableを接続する。
+  canonical personはSA loginとagent MCP resource tokenの両方で同じIDを使い、既存のSA Employee IDを
+  別名として扱うには認証済みlinkを先に作る。linkが作れない社員はpilot対象外として拒否する。
+- MF Cloud Expense OAuth appの既存client ID/secretを使えるか確認する。使えるappがなければ
+  会社管理下でOAuth appを登録してsecretを発行し、Secret ManagerからMF credentialを取り出す。
+  各社員は自分のMFIDで同じappを個別認可し、MF refresh/access tokensはcanonical person ownerで
+  暗号化保存する。個人用MF tokenを共有・複製しない。
+- SA側credentialは対象pilot tenant/managed agentだけに制限し、次の操作だけに使う。
+  invocation/run/employee/session/version/sourceの確認、当該invocationの添付metadata/binary GET、
+  approval proposalのPOST、本人決定記録のGET。POSTは本人の決定ではなく、確認依頼を作るだけ。
+  既存の別scope/service credentialがこの最小範囲を表現できない場合は、権限を広げずPreview用の
+  別credentialを用意する。外部OCR、MF書込、ユーザー一覧、admin endpointsの権限は付けない。
+- SA credentialを読むIAM bindingは、専用のprivate bridge runtime service accountだけに付ける。
+  public MCP/OAuth processのservice accountには付けない。認証bridgeはprivate network/service identityで
+  呼び、SA secret・MF secret・user refresh tokensをHTTP、MCP body、trace/logへ出さない。
+- 失効hookはEngineのper-user token revokeとagent consent revokeを同期する。MF同意取消・token refresh
+  失敗・canonical link停止も毎回のresolverで拒否し、再認証/再リンクを促す。
+
+実接続を始めるには、少なくとも次の判断・アクセスが必要になる。
+①pilotの正確なtenant/managed-agent/versionと、社員→SSO canonical IDの対応を承認、
+②会社SSOのlogin/callback検証に必要な最小権限、
+③上記API操作だけに限定したSA Preview credential、
+④既存MF OAuth appの再利用可否（不可ならclient secretの新規発行）、
+⑤固定HTTPS host、永続DB、Secret Managerに対する専用runtime IAM。
+これらはDraft PRや合成テストの承認には含まれず、設定前にそれぞれ対象を絞って確認する。
+
 Money Forwardのクラウド経費APIは、利用者がMFIDでログインしてアプリを認可したユーザー権限で
 tokenを発行する。MF側にはクラウド経費ごとのOAuthアプリ登録とclient secretが必要であり、
 refreshでは新しいaccess/refresh tokenが返る。MF client secretは配置側の秘密として保持し、社員へ
