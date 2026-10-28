@@ -174,9 +174,10 @@ adapterを分離し、現在ユーザーのprocess-global cacheを使わない�
 
 - 外部から到達できる固定HTTPS issuerで `authorization_app` と `/mcp` を稼働し、Engineの登録済み
   OAuth client/callbackと一致させる。ローカルPCや一時Preview tunnelを接続先にしない。
-- `AgentAuthorization` のcode/consent/family recordsは、複数worker間で原子的なtransactionが
-  できる永続private storeへ保存する。単一workerのpilotなら専用永続volume上のprivate SQLiteを使える。
-  scale-to-zero/一時filesystemならSQLiteを使わず、durable transactional DB adapterを用意する。
+- `AgentAuthorization` のcode/consent/family/Okta session recordsは、複数worker間で原子的なtransactionが
+  できる専用Firestore Native database `expense-assistant-auth` に保存できる。実装済みの
+  `FirestoreAuthorizationStore`を使い、runtime service accountの`roles/datastore.user`はIAM Conditionで
+  そのdatabaseに限定する。既存別用途databaseやコンテナ一時filesystemを流用しない。
 - 会社SSOの `start_login` / `verify_login` と、SA employee→canonical personの明示link tableを接続する。
   canonical personはSA loginとagent MCP resource tokenの両方で同じIDを使い、既存のSA Employee IDを
   別名として扱うには認証済みlinkを先に作る。linkが作れない社員はpilot対象外として拒否する。
@@ -199,7 +200,7 @@ adapterを分離し、現在ユーザーのprocess-global cacheを使わない�
 必要な専用host/store/secret/IAM設定を承認済み。承認済みの範囲で実装・配置準備を進める。
 本番接続を有効化するには、会社が管理するSA employee→Okta subject→canonical personの明示link、
 Okta appの今回のcallback URI登録、必要なcredentialのSecret Manager登録、private runtime IAMと
-永続storeの構成が必要。既存の `ai-corp-mcp` 用Okta app/hostは別用途のため、そのまま転用しない。
+専用Firestore databaseの作成が必要。既存の `ai-corp-mcp` 用Okta app/hostは別用途のため、そのまま転用しない。
 
 Money Forwardのクラウド経費APIは、利用者がMFIDでログインしてアプリを認可したユーザー権限で
 tokenを発行する。MF側にはクラウド経費ごとのOAuthアプリ登録とclient secretが必要であり、

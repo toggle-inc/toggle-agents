@@ -52,6 +52,13 @@ Engine・SA・Buzzはいずれも利用クライアントまたは実行先の�
 クラウドで複数レプリカを使う際は、共有のトランザクションストアへ差し替える。
 コンテナの一時SQLiteを永続ストアの代わりに使わない。
 
+`runtime/firestore_auth_store.py` にはFirestore Native database adapterがある。Cloud Runでは
+専用database ID（pilotでは `expense-assistant-auth`）を明示し、他用途のdatabaseや`(default)`を選ばない。
+adapterはtransaction内のwriteをcommit直前まで保留し、Firestoreのread-before-write制約を守りながら
+read-your-writesと原子的commitを提供する。競合は失敗として返し、認可フローをやり直す。
+runtime service accountには `roles/datastore.user` をこのFirestore database resourceだけに限定する
+IAM Conditionを付ける。DB作成・runtime IAM設定は配置管理者が行う。
+
 テストではSQLiteとメモリ用アダプタで同じ発行処理を動かし、
 独立したSQLite接続から同じコードを同時交換しても一度だけ成功することを確認する。
 更新用トークンの交換も同じトランザクションで行う。
@@ -62,8 +69,10 @@ Engine・SA・Buzzはいずれも利用クライアントまたは実行先の�
 ```python
 from authorization_app import create_app
 from runtime.authorization import AgentAuthorization
+from runtime.firestore_auth_store import FirestoreAuthorizationStore
 from runtime.okta_oidc import OktaOIDCLogin
 
+private_transactional_store = FirestoreAuthorizationStore(database="expense-assistant-auth")
 okta = OktaOIDCLogin(
     private_transactional_store,
     resolve_explicit_okta_link,
