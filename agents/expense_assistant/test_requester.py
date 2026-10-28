@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -81,6 +82,30 @@ class RequesterTests(unittest.TestCase):
         for name in self.people:
             self.assertEqual(self.call(name)[0]["id"], name)
             self.assertEqual(self.grants[name].service.mf.calls, 1)
+
+    def test_draft_only_grant_can_prepare_but_not_use_legacy_write_or_edit(self):
+        grant = dataclasses.replace(self.grants["alice"], capabilities=frozenset({"mf:draft"}))
+        self.grants["alice"] = grant
+        with patch.object(grant.service, "call", return_value={"internal_candidate": True}) as call:
+            for operation, arguments in (
+                ("mf_upload_receipt", {"office": "alice", "receipt_path": "synthetic"}),
+                ("mf_save_draft", {"preview_id": "synthetic"}),
+            ):
+                self.assertEqual(
+                    self.call("alice", operation, **arguments), {"internal_candidate": True}
+                )
+            self.assertEqual(call.call_count, 2)
+            for operation, arguments in (
+                (
+                    "mf_upload_receipt",
+                    {"office": "alice", "receipt_path": "synthetic", "confirm": True},
+                ),
+                ("mf_update_transaction", {"office": "alice", "transaction_id": "synthetic"}),
+                ("mf_delete_transaction", {"office": "alice", "transaction_id": "synthetic"}),
+            ):
+                with self.assertRaises(AuthorizationRequiredError):
+                    self.call("alice", operation, **arguments)
+            self.assertEqual(call.call_count, 2)
 
     def test_unlinked_user_never_falls_back_to_another_user(self):
         del self.grants["bob"]

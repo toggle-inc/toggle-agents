@@ -20,6 +20,7 @@ from .state import ExpenseError
 
 CAPABILITIES = frozenset(OPERATIONS.values()) | {"receipt:read"}
 CAPABILITY_LABELS = {
+    "mf:draft": "指定した会社に未申請明細を作成し領収書をOCR送信する（都度確認なし・提出不可）",
     "mf:read": "本人のMF明細・会社・申請情報を読む",
     "mf:write": "MF明細の作成・修正・削除・領収書登録（個別承認は別途必要）",
     "mf:connect": "本人のMF連携を開始・完了する",

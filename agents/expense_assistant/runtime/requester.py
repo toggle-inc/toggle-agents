@@ -38,6 +38,7 @@ OPERATIONS = {
         "mf:write",
     ),
     "mf_auth_url": "mf:connect",
+    "mf_save_draft": "mf:draft",
     "mf_auth_complete": "mf:connect",
     "calendar_events": "calendar:read",
     "fare_lookup": "fare:read",
@@ -62,7 +63,7 @@ def access_contract():
         "grant_check": "every_tool_call",
         "consent": "service_and_agent_authorization_required",
         "unlinked": "stop_and_request_private_authorization_ui",
-        "financial_writes": "separate_bound_preview_and_human_approval",
+        "financial_writes": "bound_candidate_and_person_office_consent_or_per_item_approval",
         "capabilities": dict(OPERATIONS),
         "receipt_resource_capability": "receipt:read",
     }
@@ -151,7 +152,17 @@ class RequesterDispatcher:
             inspect.signature(getattr(ExpenseService, operation)).bind(None, **arguments)
         except TypeError:
             raise ExpenseError("操作の引数から本人・接続・承認は変更できません。") from None
-        return self._service(request_context, capability).call(operation, arguments)
+        try:
+            service = self._service(request_context, capability)
+        except AuthorizationRequiredError:
+            # Narrow draft-only grants can prepare candidates, not use the old
+            # confirm=True write path, nor prepare existing-record edits/deletes.
+            if operation not in {"mf_create_transaction", "mf_upload_receipt"} or (
+                arguments.get("confirm", False) is not False
+            ):
+                raise
+            service = self._service(request_context, "mf:draft")
+        return service.call(operation, arguments)
 
     def read_receipt(self, request_context, reference):
         """Trusted resource adapter path; never use a global service.receipts."""
@@ -217,4 +228,5 @@ assert set(OPERATIONS) == set(ORIGINAL_TOOLS) | {
     "read_reference",
     "delivery_contract",
     "mf_receipt_status",
+    "mf_save_draft",
 }

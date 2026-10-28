@@ -217,6 +217,58 @@ class State:
         )
 
     @synchronized
+    def set_draft_consent(self, office_ids, consent_id, *, active=True):
+        """Trusted first-consent UI/host only. Never an LLM tool or admin-user fallback.
+
+        The DB's fixed human owner consents to creating unsubmitted expenses and
+        OCR uploads in these offices until explicitly revoked. Not update/delete
+        or submission permission. No fixed expiry is imposed on this consent.
+        """
+        import re
+
+        if (
+            type(active) is not bool
+            or not isinstance(consent_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", consent_id)
+            or not isinstance(office_ids, list)
+            or len(office_ids) > 50
+            or (active and not office_ids)
+            or any(
+                not isinstance(x, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", x)
+                for x in office_ids
+            )
+            or len(office_ids) != len(set(office_ids))
+        ):
+            raise ExpenseError("本人の初回許可と会社範囲を確認してください。")
+        record = {
+            "owner": self.owner,
+            "consent_id": consent_id,
+            "office_ids": sorted(office_ids),
+            "active": active,
+            "actions": ["create", "upload"],
+        }
+        self.db.execute(
+            "INSERT INTO settings VALUES ('draft_creation_consent',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (json.dumps(record, sort_keys=True),),
+        )
+
+    @synchronized
+    def draft_consent(self, office):
+        row = self.db.execute(
+            "SELECT value FROM settings WHERE key='draft_creation_consent'"
+        ).fetchone()
+        record = json.loads(row[0]) if row else {}
+        if (
+            record.get("owner") != self.owner
+            or record.get("active") is not True
+            or office not in record.get("office_ids", [])
+            or record.get("actions") != ["create", "upload"]
+        ):
+            raise ExpenseError("この会社の未申請明細作成を初回の連携画面で許可してください。")
+        return record
+
+    @synchronized
     def execute(self, identifier, action, office, snapshot, write):
         hashed = digest(
             {"owner": self.owner, "action": action, "office": office, "snapshot": snapshot}

@@ -6,6 +6,7 @@ import decimal
 import inspect
 import re
 import threading
+from contextvars import ContextVar
 from zoneinfo import ZoneInfo
 
 from .state import ExpenseError, OutcomeUnknownError, digest
@@ -162,6 +163,7 @@ class ExpenseService:
         self.aliases, self.references = aliases or {}, references
         self.write_enabled = write_enabled is True
         self._lock = threading.RLock()
+        self._draft_guard = ContextVar("expense_draft_consent", default=None)
 
     def call(self, operation, arguments):
         operations = ORIGINAL_TOOLS + (
@@ -170,6 +172,7 @@ class ExpenseService:
             "propose_teaching",
             "read_reference",
             "mf_receipt_status",
+            "mf_save_draft",
         )
         if operation not in operations or not isinstance(arguments, dict):
             raise ExpenseError("未対応の経費操作です。")
@@ -457,9 +460,17 @@ class ExpenseService:
             raise ExpenseError(
                 "不足・推測の項目があります。本人に確認してプレビューを修正してください。"
             )
-        return self.state.execute(
-            preview_id, action, company["id"], snapshot, lambda: execute(snapshot)
-        )
+
+        def run():
+            expected_consent = self._draft_guard.get()
+            if (
+                expected_consent is not None
+                and self.state.draft_consent(company["id"]) != expected_consent
+            ):
+                raise ExpenseError("初回の許可が変更・解除されたため、保存を止めました。")
+            return execute(snapshot)
+
+        return self.state.execute(preview_id, action, company["id"], snapshot, run)
 
     def mf_create_transaction(
         self,
@@ -820,6 +831,62 @@ class ExpenseService:
             "ocr_complete": status == "input_complete",
             "transactions": [compact(row) for row in rows],
         }
+
+    def mf_save_draft(self, preview_id):
+        """Save a prepared create/upload under initial person+office consent, no custom UI.
+
+        The preview is an internal immutable candidate, NOT a per-item user
+        confirmation screen. Host-only consent and fresh per-person capability
+        checks are still required. No update/delete/submission is authorized.
+        """
+        with self._lock:
+            details = self.state.preview_details(preview_id)
+            if details["action"] not in {"create", "upload"}:
+                raise ExpenseError("この許可では未申請明細の作成と領収書OCR送信だけを行えます。")
+            consent = self.state.draft_consent(details["office"])
+            if not self.write_enabled:
+                raise ExpenseError("現在の接続は読み取り専用です。")
+            operation = (
+                "mf_create_transaction" if details["action"] == "create" else "mf_upload_receipt"
+            )
+            if details["status"] == "preview":
+                self.state.approve_external(
+                    "expense-draft-consent/v1",
+                    consent["consent_id"] + ":" + preview_id,
+                    preview_id,
+                    details["preview_digest"],
+                    {"consent": consent, "preview_digest": details["preview_digest"]},
+                )
+            handle = self._draft_guard.set(consent)
+            try:
+                result = self.call(
+                    operation,
+                    {
+                        **details["snapshot"]["intent"],
+                        "confirm": True,
+                        "preview_id": preview_id,
+                    },
+                )
+            finally:
+                self._draft_guard.reset(handle)
+                self.state.withdraw_unused_approval(preview_id)
+            return {
+                **result,
+                "review_url": "https://expense.moneyforward.com/transactions",
+                "review_link_kind": "transaction_list",
+                "review_company": (details["snapshot"].get("office") or {}).get(
+                    "name", details["office"]
+                ),
+                "review_office_id": details["office"],
+                "draft_status": "saved_unsubmitted"
+                if details["action"] == "create"
+                else "ocr_processing",
+                "submitted": False,
+                "next_step": (
+                    "MFの会社選択を確認し、明細一覧で内容を確認・修正してから"
+                    "本人が申請してください。"
+                ),
+            }
 
     def mf_delete_transaction(self, office, transaction_id, confirm=False, preview_id=""):
         company = self._office(office)
