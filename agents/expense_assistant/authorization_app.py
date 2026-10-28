@@ -2,6 +2,7 @@
 
 import contextlib
 import html
+import inspect
 from urllib.parse import parse_qs, urlsplit
 
 from requester_mcp import create_app as create_mcp
@@ -88,16 +89,29 @@ class _PrivateHTTPS:
         return await self.app(scope, receive, private_send)
 
 
-def create_app(authority, resolve):
+def create_app(authority, resolve, *, start_login=None, login_adapter=None):
     """Host supplies SSO verification + private storage/providers, not auth logic.
 
     The configured verify_login(Request) adapter must verify its own secure SSO
     session, including subject, tenant and expiry. Unconfigured login fails closed.
+    Optional start_login(Request) initiates the host's SSO flow for an
+    unauthenticated browser authorization request and must return to the exact
+    original /oauth/authorize URL after validating a signed, single-use state.
     No cookie/query/body claiming a person is accepted by this program itself.
     """
     if not isinstance(authority, AgentAuthorization):
         raise ValueError("Agent-owned authority is required")
     origin = authority.issuer
+    if login_adapter is not None:
+        if start_login is not None:
+            raise ValueError("Configure either login_adapter or start_login, not both")
+        if (
+            login_adapter.tenant_id != authority.tenant_id
+            or login_adapter.callback_uri != origin + "/login/callback"
+            or authority.verify_login != login_adapter.verify_login
+        ):
+            raise ValueError("Okta adapter tenant, session verifier, and fixed callback must match")
+        start_login = login_adapter.start_login
     dispatcher = RequesterDispatcher(authority.authenticate, resolve, clock=authority.clock)
     mcp = create_mcp(dispatcher, urlsplit(origin).hostname)
 
@@ -212,6 +226,20 @@ def create_app(authority, resolve):
                 return Response(status_code=200)
             raise AuthorizationError("invalid_request")
         except AuthorizationError as error:
+            if (
+                error.code == "login_required"
+                and path == "/oauth/authorize"
+                and start_login is not None
+            ):
+                try:
+                    response = start_login(request)
+                    if inspect.isawaitable(response):
+                        response = await response
+                    if isinstance(response, Response):
+                        return response
+                except Exception:
+                    # Do not expose identity-provider or session details.
+                    pass
             return JSONResponse(
                 {"error": error.code}, status_code=401 if error.code == "login_required" else 400
             )
@@ -234,5 +262,12 @@ def create_app(authority, resolve):
             ("/oauth/revoke", ["POST"]),
         )
     ]
+    if login_adapter is not None:
+        routes.extend(
+            (
+                Route("/login/callback", login_adapter.callback, methods=["GET"]),
+                Route("/logout", login_adapter.logout, methods=["POST"]),
+            )
+        )
     routes.append(Mount("/", app=mcp))
     return _PrivateHTTPS(Starlette(routes=routes, lifespan=lifespan), origin)

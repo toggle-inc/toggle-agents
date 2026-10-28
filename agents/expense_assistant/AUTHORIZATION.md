@@ -13,8 +13,16 @@ Engine・SA・Buzzはいずれも利用クライアントまたは実行先の�
 ## 実装済み
 
 - 明示登録したpublic clientだけを許可。redirect URI、resource、許可能力は配置設定で固定。
+- Okta OIDCのAuthorization Code + PKCE S256ログイン、暗号化した一回限りstate、nonce、
+  discovery/JWKS確認、RS256署名・issuer・audience・`azp`・expiry・nonce検証、
+  `sub`による明示identity-link解決を `runtime/okta_oidc.py` に実装。
+- callback後はランダムなserver-side session IDのみをSecure/HttpOnly/SameSite=Lax cookieへ設定し、
+  logoutと期限切れを検証する。ID tokenやOkta client secretはcookieに保存しない。
+  メールアドレスやプロフィール属性で本人を自動リンクしない。linkがない場合は拒否する。
+- `create_app(..., login_adapter=okta)` は未ログイン認可GETからOktaへ遷移し、固定
+  `/login/callback` で元の `/oauth/authorize` URLへ戻す。Okta issuer/client/callback、秘密鍵、
+  private transactional store、明示identity-link resolverは配置設定が必要。
 - SSOで本人確認した後、本人がHTML画面で許可・拒否・既存許可の解除を選択する。
-  未ログインは401。SSOログイン画面への誘導／コールバックは別のアダプタが必要。
 - 認可コード＋PKCE S256のみ。コードは60秒・一度限り、同意フォームは5分・一度限り。
 - 同意は本人・テナント・クライアント・能力に束縛。フォームnonce・Originも検証する。
 - アクセストークンはランダムなopaque値、有効期限15分。本人・resource・能力を検証する。
@@ -44,6 +52,14 @@ Engine・SA・Buzzはいずれも利用クライアントまたは実行先の�
 クラウドで複数レプリカを使う際は、共有のトランザクションストアへ差し替える。
 コンテナの一時SQLiteを永続ストアの代わりに使わない。
 
+`runtime/postgres_auth_store.py` にPostgreSQL adapterがある。会社で利用中のNeon/Postgresを使う場合も、
+Nowcast等の既存アプリ用schema・DB role・接続文字列を共用せず、専用schema `expense_assistant_auth` と
+専用runtime roleを用意する。`runtime/postgres_auth_schema.sql` はDB管理者が適用し、実行roleには
+このschemaのUSAGEとauth_records表のSELECT/INSERT/UPDATEだけを付与する。
+adapterは各操作をPostgres transactionで実行し、読み取った行をロックして一回限りコードの同時交換を防ぐ。
+Neon pooled connection string等は配置先のSecret Managerから注入し、Git・ログ・クライアントへ出さない。
+DB/schema/roleの作成と権限設定はDB管理者が行う。既存Neonの接続文字列をそのまま流用しない。
+
 テストではSQLiteとメモリ用アダプタで同じ発行処理を動かし、
 独立したSQLite接続から同じコードを同時交換しても一度だけ成功することを確認する。
 更新用トークンの交換も同じトランザクションで行う。
@@ -52,25 +68,48 @@ Engine・SA・Buzzはいずれも利用クライアントまたは実行先の�
 ## 信頼済み配置コードから組み立てる
 
 ```python
+import os
+
 from authorization_app import create_app
 from runtime.authorization import AgentAuthorization
+from runtime.postgres_auth_store import PostgresAuthorizationStore
+from runtime.okta_oidc import OktaOIDCLogin
+
+private_transactional_store = PostgresAuthorizationStore(
+    os.environ["EXPENSE_AUTH_DATABASE_URL"], schema="expense_assistant_auth"
+)
+okta = OktaOIDCLogin(
+    private_transactional_store,
+    resolve_explicit_okta_link,
+    issuer=okta_issuer,
+    client_id=okta_client_id,
+    client_secret=okta_client_secret,
+    callback_uri=public_https_origin + "/login/callback",
+    tenant_id=configured_tenant,
+    state_encryption_key=private_okta_state_key,
+)
 
 authority = AgentAuthorization(
     private_transactional_store,
-    verify_login_session,
+    okta.verify_login,
     issuer=public_https_origin,
     tenant_id=configured_tenant,
     clients=explicit_public_clients,
 )
-app = create_app(authority, resolve_own_service)
+app = create_app(authority, resolve_own_service, login_adapter=okta)
 ```
 
-この例の変数は実際の配置アダプタが提供するもので、設定済みではない。
-`verify_login_session(Request)` は会社SSOの署名・発行元・宛先・有効期限・テナントを検証し、
-認証済みの共通個人を `Requester` として返す。
-自己申告cookie、無署名ヘッダー、モデル出力を返してはならない。
-同一の会社SSO／明示的な本人アカウント連携に基づき共通個人IDを決める。メール一致による自動統合は禁止。
-本モジュールはパスワード収集・独自の社員アカウント管理・Engine JWTの流用を行わない。
+この例の変数は配置先が提供する。Okta callback URLはOkta appにも完全一致で登録する。
+`resolve_explicit_okta_link(tenant, issuer, sub)` は会社が管理する本人linkを参照し、
+認証済みのcanonical person IDまたは未リンクを返す。自己申告cookie、無署名ヘッダー、
+モデル出力、メール一致で本人を選ばない。本モジュールはパスワード収集・独自の社員アカウント管理・
+Engine JWTの流用を行わない。
+
+ブラウザで初めて接続する際は、`create_app(..., login_adapter=okta)` を使う。
+adapterは `/oauth/authorize` の完全な元URLを暗号化済み・一度限りのstateへ結び付け、
+Okta callback後にそのURLへ戻す。任意の `return_to` を受け付けず、クライアントのredirect URIへ直接
+戻してはならない。同意POSTはブラウザログインへ再送せず401で停止し、ログイン後に画面から本人が
+もう一度選択する。実Okta app設定、host、明示link tableの接続と実機確認は別途必要。
 
 `resolve_own_service(person, capability)` は、その本人のMF・カレンダー等の現在の同意と実接続だけを返す。
 本人トークンの取得は、MF・Googleへの利用許可を得た証明ではない。
@@ -99,7 +138,7 @@ MF・Google自身の同意取消・セキュリティポリシーによる失効
 
 ## 今回は対応しないもの／公開前の条件
 
-- 実会社SSOの接続、実MF・Googleの本人別認証画面への統合、既存Engineでの実OAuth往復。
+- 実Okta app/Cloud Run設定、社員の明示identity link投入、実MF・Googleの本人別認証画面への統合、既存Engineでの実OAuth往復。
 - 自動クライアント登録、implicit／password／client credentials grant。
 - callbackはHTTPSの固定URIだけを受け付ける。ネイティブアプリのloopback URIやカスタムschemeは未対応。
 - SA等の実行依頼者と、OAuthで許可したSSO本人との対応付けの実機検証。
@@ -108,7 +147,7 @@ MF・Google自身の同意取消・セキュリティポリシーによる失効
 - 公開入口のレート制限、期限切れメタデータの保存期間／削除、バックアップ、監査・アカウント停止連動。
   これらは配置アダプタ／運用を含めて決め、実ユーザー公開前に検証する。
 
-今回の検証は、模擬SSO・模擬MFで、実際の同意／発行／検証プログラムとSDKのHTTP/JSON-RPCを通すASGIテスト。
+今回の検証は、合成Okta署名鍵・合成SSO/MFで、実際の同意／発行／検証プログラムとSDKのHTTP/JSON-RPCを通すASGIテスト。
 本番での本人認証・外部サービス連携成功を意味しない。既存公開版や本人の接続は変更しない。
 
 ## 検証と参照
