@@ -20,6 +20,13 @@ SAの画面・権限判定をここに複製せず、正本の明細内容を不
   表示用JSONは正本側で2スペースの改行付きに整え、SAはその文字列をそのまま表示する。
   数値・Unicode・全項目を保持し、ダイジェストも実際の表示bytesで照合する。
   表示形式を変えた既存提案は上書きせず、新しいpreviewで本人確認をやり直す。
+  通常画面用には `presentation:{title,sections:[{title,fields:[{label,value}]}]}` も付加する。
+  `runtime/presentation.py` が会社名・操作・全明細・変更前後・添付・注意点・出典をplain text化する。
+  全valueは正本で文字列化し、SAで丸め・業務解釈・省略をしない。元snapshotと表示構造の両方を
+  同じ不変payloadのdigestへ束縛する。raw JSONは通常画面の代わりではなく詳細記録として残す。
+  未知の追加項目も表示し、section/field数や文字数の上限超過は省略せず拒否または分割する。
+  title/labelは1〜200文字、valueは1〜16000文字、sectionsは1〜100、各fieldsは1〜200。
+  SAは文字列をplain textとして描画し、HTML/Markdownとして実行しない。
 - SAからのpreview/digest/expiry/payload/contentDigest/scopeと固定の確認画面パスを照合する。
   `propose`だけでは承認しない。
 - `execute_approved(preview_id, approval_id)` は実行直前にSAの承認記録をGETし、APPROVED・

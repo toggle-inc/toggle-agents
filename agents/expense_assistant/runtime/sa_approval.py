@@ -13,6 +13,7 @@ import re
 import time
 from urllib.parse import quote, urlsplit
 
+from .presentation import build_presentation
 from .state import ExpenseError, digest
 
 SCOPE_KEYS = {
@@ -183,15 +184,17 @@ class SAApprovalAdapter:
             ):
                 raise ExpenseError("領収書と今回の起点添付の対応を確認できません。")
             attachments.append(source)
+        visible_snapshot = _visible(details["snapshot"])
         payload = _json(
             {
                 "protocol": "expense-human-preview/v1",
                 "scope": self.scope,
                 "action": details["action"],
                 "office_id": details["office"],
-                "snapshot": _visible(details["snapshot"]),
+                "snapshot": visible_snapshot,
                 "preview_digest": details["preview_digest"],
                 "source_attachments": attachments,
+                "presentation": build_presentation(details, visible_snapshot, attachments),
             }
         )
         if len(payload.encode("utf-8")) > 128000:

@@ -450,6 +450,7 @@ class ExpenseService:
                 return completed
         snapshot, display = prepare()
         snapshot["intent"] = intent
+        snapshot["office"] = {"id": company["id"], "name": company["name"]}
         if not confirm:
             return {**display, **self.state.preview(action, company["id"], snapshot)}
         if "form" in snapshot and not snapshot["form"]["ready"]:
