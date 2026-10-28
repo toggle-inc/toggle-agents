@@ -75,6 +75,12 @@ class State:
         if "due_date" not in {row[1] for row in self.db.execute("PRAGMA table_info(facts)")}:
             self.db.execute("ALTER TABLE facts ADD COLUMN due_date TEXT")
         self.db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        # One receipt must not create multiple expenses through new previews,
+        # another company or switching between direct create and MF OCR upload.
+        # This DB is already bound to one verified human. Never auto-release an
+        # uncertain or completed claim, even after restart or preview expiry.
+        self.db.execute("""CREATE TABLE IF NOT EXISTS receipt_claims (
+            fingerprint TEXT PRIMARY KEY, preview_id TEXT NOT NULL UNIQUE)""")
 
     @synchronized
     def preview(self, action, office, snapshot, *, lifetime=600):
@@ -139,6 +145,33 @@ class State:
                 )
             if row[1] <= self.clock() or not row[3]:
                 raise ExpenseError("本人の有効な承認がありません。")
+            fingerprint = snapshot.get("receipt_fingerprint")
+            if fingerprint is not None:
+                if (
+                    action not in {"create", "upload"}
+                    or not isinstance(fingerprint, str)
+                    or len(fingerprint) != 64
+                    or any(c not in "0123456789abcdef" for c in fingerprint)
+                ):
+                    raise ExpenseError("領収書の照合情報を確認してください。")
+                prior = self.db.execute(
+                    "SELECT p.status FROM receipt_claims c "
+                    "LEFT JOIN previews p ON p.id=c.preview_id WHERE c.fingerprint=?",
+                    (fingerprint,),
+                ).fetchone()
+                if prior:
+                    if prior[0] == "done":
+                        raise ExpenseError(
+                            "同じ領収書は処理済みです。既存の明細・OCR結果を確認してください。"
+                            "新しいプレビューでも二重登録しません。"
+                        )
+                    raise OutcomeUnknownError(
+                        "同じ領収書の処理中または結果不明です。MF明細と照合してください。"
+                        "新しいプレビューでも自動再送しません。"
+                    )
+                self.db.execute(
+                    "INSERT INTO receipt_claims VALUES (?,?)", (fingerprint, identifier)
+                )
             self.db.execute("UPDATE previews SET status='executing' WHERE id=?", (identifier,))
             self.db.execute("COMMIT")
         except BaseException:
@@ -163,9 +196,13 @@ class State:
         row = self.db.execute(
             "SELECT action,office,snapshot,status,result FROM previews WHERE id=?", (identifier,)
         ).fetchone()
-        if row and row[3] == "done":
+        if row and row[3] in {"done", "executing", "unknown"}:
             if row[0] != action or row[1] != office or json.loads(row[2]).get("intent") != intent:
                 raise ExpenseError("完了した操作の本人・会社・内容と一致しません。")
+            if row[3] != "done":
+                raise OutcomeUnknownError(
+                    "前回の書き込み結果を照合してください。自動再送はしません。"
+                )
             return json.loads(row[4])
         return None
 

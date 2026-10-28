@@ -264,6 +264,9 @@ class MFClient:
             "POST", self._path(office, "ex_transactions"), json={"ex_transaction": payload}
         )
 
+    def get_transaction(self, office, identifier):
+        return self.request("GET", self._path(office, f"ex_transactions/{self._id(identifier)}"))
+
     def update_transaction(self, office, identifier, payload):
         return self.request(
             "PUT",

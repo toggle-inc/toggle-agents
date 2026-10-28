@@ -8,7 +8,7 @@ import re
 import threading
 from zoneinfo import ZoneInfo
 
-from .state import ExpenseError, OutcomeUnknownError
+from .state import ExpenseError, OutcomeUnknownError, digest
 
 ORIGINAL_TOOLS = (
     "mf_auth_url",
@@ -217,6 +217,45 @@ class ExpenseService:
         if provider is None:
             raise ExpenseError(f"{name}が未接続です。設定を確認してください。")
         return provider
+
+    def _verify_written_transaction(self, office, identifier, payload):
+        """Read the exact personal record; a POST/PUT acknowledgement is not verification."""
+        try:
+            response = self.mf.get_transaction(office, identifier)
+            transaction = response.get("ex_transaction", response)
+            if not isinstance(transaction, dict) or transaction.get("id") != identifier:
+                raise ValueError("wrong transaction")
+            fields = sorted(
+                set(payload)
+                & {
+                    "recognized_at",
+                    "value",
+                    "remark",
+                    "memo",
+                    "ex_item_id",
+                    "report_number",
+                    "project_id",
+                    "dept_id",
+                    "invoice_registration_number",
+                }
+            )
+            for key in fields:
+                if key not in transaction:
+                    raise ValueError("readback field missing")
+                actual, expected = transaction.get(key), payload[key]
+                if key == "value" and type(actual) not in (int, float):
+                    raise ValueError("invalid amount in readback")
+                # MF may represent clearing an optional text field as null.
+                if actual != expected and not (expected == "" and actual is None):
+                    raise ValueError("readback mismatch")
+            if payload.get("receipt_input") and not transaction.get("mf_file"):
+                raise ValueError("receipt attachment not yet visible")
+            return transaction, fields
+        except Exception as error:
+            raise OutcomeUnknownError(
+                "MFへの書き込み後の照合が完了していません。実際の明細を確認してください。"
+                "書き込みを自動再送しません。"
+            ) from error
 
     def mf_auth_url(self):
         return self.mf.authorize_url()
@@ -524,6 +563,10 @@ class ExpenseService:
                 "warnings": warnings,
                 "form": draft,
             }
+            if receipt_path:
+                snapshot["receipt_fingerprint"] = digest(
+                    {key: payload["receipt_input"][key] for key in ("content", "content_type")}
+                )
             return snapshot, {
                 "preview": shown,
                 "office": company["name"],
@@ -539,10 +582,15 @@ class ExpenseService:
             transaction = response.get("ex_transaction", response)
             if not transaction.get("id"):
                 raise OutcomeUnknownError("作成結果を確認できません。MF明細を照合してください。")
+            transaction, verified = self._verify_written_transaction(
+                company["id"], transaction["id"], snapshot["payload"]
+            )
             return {
                 "created": True,
                 "transaction": compact(transaction),
                 "warnings": snapshot["warnings"],
+                "readback_verified": True,
+                "verified_fields": verified,
             }
 
         return self._write(
@@ -628,7 +676,15 @@ class ExpenseService:
             transaction = response.get("ex_transaction", response)
             if transaction.get("id") != transaction_id:
                 raise OutcomeUnknownError("更新結果を照合してください。")
-            return {"updated": True, "transaction": compact(transaction)}
+            transaction, verified = self._verify_written_transaction(
+                company["id"], transaction_id, snapshot["payload"]
+            )
+            return {
+                "updated": True,
+                "transaction": compact(transaction),
+                "readback_verified": True,
+                "verified_fields": verified,
+            }
 
         return self._write(
             "update", company, intent, prepare, execute, confirm=confirm, preview_id=preview_id
@@ -640,7 +696,12 @@ class ExpenseService:
 
         def prepare():
             payload = self._require(self.receipts, "領収書").payload(receipt_path, ocr=True)
-            return {"payload": payload}, {
+            return {
+                "payload": payload,
+                "receipt_fingerprint": digest(
+                    {key: payload[key] for key in ("content", "content_type")}
+                ),
+            }, {
                 "preview": {"receipt": payload["filename"], "office": company["name"], "ocr": True},
                 "uploaded": False,
             }

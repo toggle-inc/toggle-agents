@@ -70,13 +70,21 @@ class FakeMF:
         if self.fail_write:
             raise OutcomeUnknownError("synthetic unknown outcome")
         row = {**payload, "id": "synthetic-created"}
+        if payload.get("receipt_input"):
+            row["mf_file"] = {"id": "synthetic-file"}
         self.rows[office].append(row)
+        return {"ex_transaction": copy.deepcopy(row)}
+
+    def get_transaction(self, office, identifier):
+        row = next(row for row in self.rows[office] if row["id"] == identifier)
         return {"ex_transaction": copy.deepcopy(row)}
 
     def update_transaction(self, office, identifier, payload):
         self.writes.append(("update", office, copy.deepcopy(payload)))
         row = next(row for row in self.rows[office] if row["id"] == identifier)
         row.update(payload)
+        if payload.get("receipt_input"):
+            row["mf_file"] = {"id": "synthetic-file"}
         return {"ex_transaction": copy.deepcopy(row)}
 
     def delete_transaction(self, office, identifier):
@@ -249,6 +257,105 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(first["created"])
         self.assertEqual(first, second)
         self.assertEqual(len(self.mf.writes), 1)
+        self.assertTrue(first["readback_verified"])
+        self.assertIn("value", first["verified_fields"])
+
+    def test_write_readback_mismatch_is_not_success_or_retried(self):
+        for operation in ("create", "update"):
+            with self.subTest(operation=operation):
+                args = (
+                    self.create
+                    if operation == "create"
+                    else {
+                        "office": "office-a",
+                        "transaction_id": "tx-a",
+                        "value": 500,
+                    }
+                )
+                method = getattr(self.service, "mf_" + operation + "_transaction")
+                preview = method(**args)
+                self.approve(preview)
+                before = len(self.mf.writes)
+                with patch.object(
+                    self.mf,
+                    "get_transaction",
+                    return_value={
+                        "ex_transaction": {
+                            "id": "synthetic-created" if operation == "create" else "tx-a",
+                            "value": 999,
+                        },
+                    },
+                ):
+                    with self.assertRaises(OutcomeUnknownError):
+                        method(**args, confirm=True, preview_id=preview["preview_id"])
+                with self.assertRaises(OutcomeUnknownError):
+                    method(**args, confirm=True, preview_id=preview["preview_id"])
+                self.assertEqual(len(self.mf.writes), before + 1)
+
+    def test_write_readback_failure_holds_receipt_even_under_new_preview(self):
+        reference = self.files.save(b"%PDF-1.4\nsynthetic receipt", "application/pdf")["path"]
+        args = {**self.create, "receipt_path": reference}
+        preview = self.service.mf_create_transaction(**args)
+        self.approve(preview)
+        with patch.object(
+            self.mf, "get_transaction", side_effect=ExpenseError("synthetic read error")
+        ):
+            with self.assertRaises(OutcomeUnknownError):
+                self.service.mf_create_transaction(
+                    **args, confirm=True, preview_id=preview["preview_id"]
+                )
+        new = self.service.mf_create_transaction(**args)
+        self.approve(new)
+        with self.assertRaises(OutcomeUnknownError):
+            self.service.mf_create_transaction(**args, confirm=True, preview_id=new["preview_id"])
+        self.assertEqual(len(self.mf.writes), 1)
+
+    def test_invoice_clear_requires_explicit_field_in_readback(self):
+        args = {"office": "office-a", "transaction_id": "tx-a", "invoice_registration_number": ""}
+        preview = self.service.mf_update_transaction(**args)
+        self.approve(preview)
+        with patch.object(
+            self.mf, "get_transaction", return_value={"ex_transaction": {"id": "tx-a"}}
+        ):
+            with self.assertRaises(OutcomeUnknownError):
+                self.service.mf_update_transaction(
+                    **args, confirm=True, preview_id=preview["preview_id"]
+                )
+
+    def test_receipt_not_visible_in_readback_is_not_verified(self):
+        reference = self.files.save(b"%PDF-1.4\nsynthetic receipt", "application/pdf")["path"]
+        args = {**self.create, "receipt_path": reference}
+        preview = self.service.mf_create_transaction(**args)
+        self.approve(preview)
+        original = self.mf.get_transaction
+
+        def without_file(office, identifier):
+            result = original(office, identifier)
+            result["ex_transaction"].pop("mf_file")
+            return result
+
+        with patch.object(self.mf, "get_transaction", side_effect=without_file):
+            with self.assertRaises(OutcomeUnknownError):
+                self.service.mf_create_transaction(
+                    **args, confirm=True, preview_id=preview["preview_id"]
+                )
+
+    def test_invoice_readback_mismatch_is_not_verified(self):
+        args = {**self.create, "invoice_registration_number": "T0000000000000"}
+        preview = self.service.mf_create_transaction(**args)
+        self.approve(preview)
+        original = self.mf.get_transaction
+
+        def wrong_invoice(office, identifier):
+            result = original(office, identifier)
+            result["ex_transaction"]["invoice_registration_number"] = "T0000000000001"
+            return result
+
+        with patch.object(self.mf, "get_transaction", side_effect=wrong_invoice):
+            with self.assertRaises(OutcomeUnknownError):
+                self.service.mf_create_transaction(
+                    **args, confirm=True, preview_id=preview["preview_id"]
+                )
 
     def test_invoice_create_is_shown_bound_to_approval_and_read_back(self):
         arguments = {**self.create, "invoice_registration_number": "T0000000000000"}
@@ -417,6 +524,153 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(writes, ["one"])
         finally:
             second.close()
+
+    def test_same_receipt_cannot_create_twice_with_different_references_and_previews(self):
+        references = [
+            self.files.save(b"%PDF-1.4\nsynthetic receipt", "application/pdf")["path"]
+            for _ in range(2)
+        ]
+        self.assertNotEqual(*references)
+        arguments = [{**self.create, "receipt_path": reference} for reference in references]
+        previews = [self.service.mf_create_transaction(**args) for args in arguments]
+        for preview in previews:
+            self.approve(preview)
+        self.service.mf_create_transaction(
+            **arguments[0], confirm=True, preview_id=previews[0]["preview_id"]
+        )
+        with self.assertRaises(ExpenseError):
+            self.service.mf_create_transaction(
+                **arguments[1], confirm=True, preview_id=previews[1]["preview_id"]
+            )
+        self.assertEqual(len(self.mf.writes), 1)
+
+    def test_ocr_upload_blocks_later_create_of_same_receipt_even_for_other_company(self):
+        reference = self.files.save(b"%PDF-1.4\nsynthetic receipt", "application/pdf")["path"]
+        uploaded = self.service.mf_upload_receipt("office-a", reference)
+        self.approve(uploaded)
+        self.service.mf_upload_receipt("office-a", reference, True, uploaded["preview_id"])
+        args = {**self.create, "office": "office-b", "receipt_path": reference}
+        preview = self.service.mf_create_transaction(**args)
+        self.approve(preview)
+        with self.assertRaises(ExpenseError):
+            self.service.mf_create_transaction(
+                **args, confirm=True, preview_id=preview["preview_id"]
+            )
+        self.assertEqual([row[0] for row in self.mf.writes], ["upload"])
+
+    def test_create_blocks_later_ocr_upload_of_same_receipt(self):
+        reference = self.files.save(b"%PDF-1.4\nsynthetic receipt", "application/pdf")["path"]
+        args = {**self.create, "receipt_path": reference}
+        preview = self.service.mf_create_transaction(**args)
+        self.approve(preview)
+        self.service.mf_create_transaction(**args, confirm=True, preview_id=preview["preview_id"])
+        uploaded = self.service.mf_upload_receipt("office-a", reference)
+        self.approve(uploaded)
+        with self.assertRaises(ExpenseError):
+            self.service.mf_upload_receipt("office-a", reference, True, uploaded["preview_id"])
+        self.assertEqual([row[0] for row in self.mf.writes], ["create"])
+
+    def test_unknown_receipt_write_cannot_be_retried_with_new_preview_after_restart(self):
+        reference = self.files.save(b"%PDF-1.4\nsynthetic receipt", "application/pdf")["path"]
+        args = {**self.create, "receipt_path": reference}
+        preview = self.service.mf_create_transaction(**args)
+        self.approve(preview)
+        self.mf.fail_write = True
+        with self.assertRaises(OutcomeUnknownError):
+            self.service.mf_create_transaction(
+                **args, confirm=True, preview_id=preview["preview_id"]
+            )
+        self.state.close()
+        self.state = State(self.root / "state.sqlite", FakeMF.owner, clock=lambda: self.now[0])
+        self.service.state = self.state
+        preview = self.service.mf_create_transaction(**args)
+        self.approve(preview)
+        with self.assertRaises(OutcomeUnknownError):
+            self.service.mf_create_transaction(
+                **args, confirm=True, preview_id=preview["preview_id"]
+            )
+        self.assertEqual(len(self.mf.writes), 1)
+
+    def test_distinct_receipts_can_create_independent_transactions(self):
+        for content in (b"%PDF-1.4\nsynthetic A", b"%PDF-1.4\nsynthetic B"):
+            reference = self.files.save(content, "application/pdf")["path"]
+            args = {**self.create, "receipt_path": reference}
+            preview = self.service.mf_create_transaction(**args)
+            self.approve(preview)
+            self.service.mf_create_transaction(
+                **args, confirm=True, preview_id=preview["preview_id"]
+            )
+        self.assertEqual(len(self.mf.writes), 2)
+
+    def test_unapproved_receipt_attempt_does_not_block_later_approved_preview(self):
+        reference = self.files.save(b"%PDF-1.4\nsynthetic receipt", "application/pdf")["path"]
+        args = {**self.create, "receipt_path": reference}
+        old = self.service.mf_create_transaction(**args)
+        with self.assertRaises(ExpenseError):
+            self.service.mf_create_transaction(**args, confirm=True, preview_id=old["preview_id"])
+        new = self.service.mf_create_transaction(**args)
+        self.approve(new)
+        self.service.mf_create_transaction(**args, confirm=True, preview_id=new["preview_id"])
+        self.assertEqual(len(self.mf.writes), 1)
+
+    def test_receipt_claim_is_atomic_across_previews_and_database_connections(self):
+        import concurrent.futures
+        import threading
+
+        second = State(self.root / "state.sqlite", FakeMF.owner, clock=lambda: self.now[0])
+        snapshot = {"receipt_fingerprint": "a" * 64, "intent": {"synthetic": True}}
+        previews = [
+            self.state.preview(action, "office-a", snapshot) for action in ("create", "upload")
+        ]
+        for preview in previews:
+            self.approve(preview)
+        entered, release = threading.Event(), threading.Event()
+        writes = []
+
+        def write():
+            writes.append("one")
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("test release timed out")
+            return {"created": True}
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                future = pool.submit(
+                    self.state.execute,
+                    previews[0]["preview_id"],
+                    "create",
+                    "office-a",
+                    snapshot,
+                    write,
+                )
+                try:
+                    self.assertTrue(entered.wait(5))
+                    with self.assertRaises(OutcomeUnknownError):
+                        second.execute(
+                            previews[1]["preview_id"], "upload", "office-a", snapshot, write
+                        )
+                finally:
+                    release.set()
+                self.assertEqual(future.result(timeout=5), {"created": True})
+                with self.assertRaises(ExpenseError):
+                    second.execute(previews[1]["preview_id"], "upload", "office-a", snapshot, write)
+                self.assertEqual(writes, ["one"])
+        finally:
+            second.close()
+
+    def test_same_receipt_approved_replay_returns_recorded_result_only_once(self):
+        reference = self.files.save(b"%PDF-1.4\nsynthetic receipt", "application/pdf")["path"]
+        preview = self.service.mf_upload_receipt("office-a", reference)
+        self.approve(preview)
+        first = self.service.mf_upload_receipt("office-a", reference, True, preview["preview_id"])
+        self.state.close()
+        self.state = State(self.root / "state.sqlite", FakeMF.owner, clock=lambda: self.now[0])
+        self.service.state = self.state
+        self.now[0] += 3600
+        second = self.service.mf_upload_receipt("office-a", reference, True, preview["preview_id"])
+        self.assertEqual(first, second)
+        self.assertEqual(len(self.mf.writes), 1)
 
     def test_update_and_delete_are_previewed_approved_and_idempotent(self):
         change = {"office": "office-a", "transaction_id": "tx-a", "memo": "本人が直した経路"}
@@ -742,6 +996,15 @@ class ProviderTests(unittest.TestCase):
             self.assertEqual(
                 calls[0].url.path, "/api/external/v1/offices/office-a/me/ex_transactions"
             )
+            with self.assertRaises(ExpenseError):
+                client.get_transaction("office-a", "tx-a")
+            self.assertEqual(calls[1].method, "GET")
+            self.assertEqual(
+                calls[1].url.path, "/api/external/v1/offices/office-a/me/ex_transactions/tx-a"
+            )
+            with self.assertRaises(ExpenseError):
+                client.get_transaction("office-a", "../another-person")
+            self.assertEqual(len(calls), 2)
 
     def test_mcp_exposes_operations_but_not_trusted_approval_methods(self):
         import asyncio
