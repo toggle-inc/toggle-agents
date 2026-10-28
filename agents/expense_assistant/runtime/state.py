@@ -81,6 +81,9 @@ class State:
         # uncertain or completed claim, even after restart or preview expiry.
         self.db.execute("""CREATE TABLE IF NOT EXISTS receipt_claims (
             fingerprint TEXT PRIMARY KEY, preview_id TEXT NOT NULL UNIQUE)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS external_approval_events (
+            source TEXT NOT NULL, event_id TEXT NOT NULL, preview_id TEXT NOT NULL,
+            digest TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(source,event_id))""")
 
     @synchronized
     def preview(self, action, office, snapshot, *, lifetime=600):
@@ -123,6 +126,65 @@ class State:
         ).rowcount
         if not changed:
             raise ExpenseError("プレビューの内容・期限・状態を再確認してください。")
+
+    @synchronized
+    def preview_details(self, identifier):
+        """Trusted host only: exact private snapshot, never an LLM tool/resource."""
+        row = self.db.execute(
+            "SELECT action,office,snapshot,hash,expires,status FROM previews WHERE id=?",
+            (identifier,),
+        ).fetchone()
+        if not row:
+            raise ExpenseError("本人の確認対象が見つかりません。")
+        action, office, raw, hashed, expires, status = row
+        snapshot = json.loads(raw)
+        if (
+            digest({"owner": self.owner, "action": action, "office": office, "snapshot": snapshot})
+            != hashed
+        ):
+            raise ExpenseError("本人の確認内容の整合性を確認できません。")
+        return {
+            "preview_id": identifier,
+            "preview_digest": hashed,
+            "expires_at": expires,
+            "action": action,
+            "office": office,
+            "snapshot": snapshot,
+            "status": status,
+        }
+
+    @synchronized
+    def approve_external(self, source, event_id, identifier, expected_digest, evidence):
+        """Trusted verifier only; persist immutable source-event evidence with approval."""
+        encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        expected = (identifier, expected_digest, encoded)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.db.execute(
+                "SELECT preview_id,digest,evidence FROM external_approval_events "
+                "WHERE source=? AND event_id=?",
+                (source, event_id),
+            ).fetchone()
+            if existing is not None and existing != expected:
+                raise ExpenseError("本人承認イベントが別の対象・内容に使われています。")
+            if existing is None:
+                self.db.execute(
+                    "INSERT INTO external_approval_events VALUES (?,?,?,?,?)",
+                    (source, event_id, *expected),
+                )
+            self.approve(identifier, expected_digest)
+            self.db.execute("COMMIT")
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    @synchronized
+    def withdraw_unused_approval(self, identifier):
+        """Host cleanup after refused execution; never release receipt/execution claims."""
+        self.db.execute(
+            "UPDATE previews SET approved=0 WHERE id=? AND status='preview'", (identifier,)
+        )
 
     @synchronized
     def execute(self, identifier, action, office, snapshot, write):
