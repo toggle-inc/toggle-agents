@@ -61,6 +61,13 @@ adapterは各操作をPostgres transactionで実行し、読み取った行を�
 読み取り前に取得する。同一schemaの認証操作は直列化されるため、実配置では待ち時間・
 connection/statement timeoutも監視・設定する。合成モデルで競合とロールバックを検証しているが、
 実Neonでの接続・ロック・最小権限検証は別途必要。
+
+`test_postgres_local.py` には、使い捨てのloopback PostgreSQL専用の実DBテストがある。
+`EXPENSE_SYNTHETIC_POSTGRES_DSN` を明示したときだけ実行し、hostが `127.0.0.1`、
+DB名が `expense_synthetic` でなければ拒否する。テスト自身が作る一意なschemaと
+合成ロールだけを使用・削除する。保存/rollback/再接続、6並列の初回更新、OAuth codeの
+一回限り交換・refresh・失効、USAGEとSELECT/INSERT/UPDATEだけのroleでの動作を確認する。
+PostgreSQL 17の隔離Dockerで4件成功。実Neonの資格情報・設定・TLSを検証した証跡ではない。
 Neon pooled connection string等は配置先のSecret Managerから注入し、Git・ログ・クライアントへ出さない。
 DB/schema/roleの作成と権限設定はDB管理者が行う。既存Neonの接続文字列をそのまま流用しない。
 
