@@ -40,3 +40,26 @@
 `test_requester_mcp.py` では実際のMCP SDKとASGI HTTP/JSON-RPC接続を使い、`mf:draft` だけを許可した本人の内部候補作成→保存→MFリンク返却・readback・再送1件維持、別人の候補参照拒否、同意取消し後の停止、OCR処理中表示、従来の直接書き込み経路の拒否も検査する。認証検証器とMF提供元は合成であり、実SSO・実MFへの接続証跡ではない。
 
 ホストの初回同意UIとの接続、配置済みエージェントへの反映、実際の経費によるMF保存と本人DM配送の一連の確認は別途必要。コード追加だけで既存接続の権限を変更しない。従来の `SA_APPROVAL.md` / `PILOT.md` にある都度確認UIは、別途承認が必要な更新・削除および実験用の経路として保存するが、新規明細の標準フローにはしない。
+
+## 初回同意UIと保存許可の結合
+
+正本の `runtime/draft_consent.py` は、同じ本人別resolverを使って、認証済み本人のMF会社候補を同意画面へ表示する。本人が1社を選択し、CSRFと一回限りのOAuth requestに束縛して許可すると、その本人専用Stateへ会社別の作成許可を記録する。会社ID・本人ID・許可内容をモデルやチャットから渡して発行する経路ではない。
+
+```python
+from authorization_app import create_app
+from runtime.draft_consent import DraftConsentBinding
+
+binding = DraftConsentBinding(authority, resolve_own_service)
+app = create_app(
+    authority,
+    resolve_own_service,
+    login_adapter=verified_okta_login,
+    draft_consent=binding,
+)
+```
+
+この設定は配置先の信頼済みホストが行う。本人のMF接続が無いときは停止し、他人・管理者の接続を代用しない。`mf:draft` のOAuth requestにこのbindingが無ければ同意画面を拒否する。既存の読み取り同意には影響しない。許可解除ではOAuth tokenと会社別作成許可の両方を無効化する。複数の保存先にまたがる操作は、失敗時に作成権限を得られない方向へ止め、未完了の認可コードを金融実行の根拠にしない。
+
+`test_draft_authorization.py` は、合成SSO/MFと実HTTP/OAuth/MCPで、会社選択→初回同意→トークン発行→候補→保存→MFリンク→トークン更新後の再取得を検証する。別人・会社差替え・CSRF不一致・拒否・解除も検査する。実Okta/Neon/MFへの接続検証ではない。
+
+配置時には認証ストアだけでなく、resolverが返す本人別のMF資格情報・State・領収書の永続保存先も必要。Postgres認証adapterを追加しただけで、SQLiteの業務Stateや領収書がサーバーレス環境で永続化されるわけではない。新しいruntimeへ配置する前に、再起動後も同意・重複防止・本人別保存を維持する構成を確認する。

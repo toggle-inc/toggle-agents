@@ -72,12 +72,21 @@ class PostgresAuthorizationStore:
         self._connection_string = connection_string
         self._connect = connect
         self._schema = schema
+        # A row lock cannot protect a missing record. Serialize this schema's
+        # transactions before any reads, including read/modify/create flows.
+        # One lock also avoids lock-order inversions across OAuth record keys.
+        self._lock_key = int.from_bytes(
+            hashlib.sha256(f"expense-assistant-auth:{schema}".encode()).digest()[:8],
+            byteorder="big",
+            signed=True,
+        )
 
     @contextlib.contextmanager
     def transaction(self):
         connection = self._connect(self._connection_string)
         try:
             with connection.transaction():
+                connection.execute("SELECT pg_advisory_xact_lock(%s)", (self._lock_key,))
                 yield _PostgresRecords(connection, self._schema)
         finally:
             connection.close()

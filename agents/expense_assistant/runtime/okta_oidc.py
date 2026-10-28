@@ -73,7 +73,10 @@ class OktaOIDCLogin:
     ):
         self.issuer = _https_url(issuer)
         self.callback_uri = _https_url(callback_uri)
-        if not all(isinstance(value, str) and value.strip() for value in (client_id, client_secret, tenant_id)):
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (client_id, client_secret, tenant_id)
+        ):
             raise ValueError("Okta client and tenant configuration required")
         if not callable(resolve_person):
             raise ValueError("Explicit identity-link resolver required")
@@ -89,7 +92,9 @@ class OktaOIDCLogin:
         self.session_ttl = session_ttl
         self.clock = clock
         self.http_client_factory = http_client_factory
-        self._fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(state_encryption_key.encode()).digest()))
+        self._fernet = Fernet(
+            base64.urlsafe_b64encode(hashlib.sha256(state_encryption_key.encode()).digest())
+        )
         namespace = f"expense-okta-v1:{self.issuer}:{tenant_id}:"
         self._prefix = hashlib.sha256(namespace.encode()).hexdigest()
         self._metadata = None
@@ -138,7 +143,11 @@ class OktaOIDCLogin:
         state = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(48)
-        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
         now = self.clock()
         payload = {
             "authorize_url": authorize_url,
@@ -146,7 +155,9 @@ class OktaOIDCLogin:
             "verifier": verifier,
             "expires_at": now + 300,
         }
-        encrypted = self._fernet.encrypt(json.dumps(payload, separators=(",", ":")).encode()).decode()
+        encrypted = self._fernet.encrypt(
+            json.dumps(payload, separators=(",", ":")).encode()
+        ).decode()
         with self.store.transaction() as records:
             records.put(self._key("state", state), {"payload": encrypted, "used": False})
         query = urlencode(
@@ -223,7 +234,12 @@ class OktaOIDCLogin:
             with self.store.transaction() as records:
                 records.put(
                     self._key("session", session_id),
-                    {"tenant_id": self.tenant_id, "person_id": person_id, "expires_at": expires_at, "revoked": False},
+                    {
+                        "tenant_id": self.tenant_id,
+                        "person_id": person_id,
+                        "expires_at": expires_at,
+                        "revoked": False,
+                    },
                 )
             response = RedirectResponse(payload["authorize_url"], status_code=303)
             response.set_cookie(
@@ -236,10 +252,21 @@ class OktaOIDCLogin:
                 path="/",
             )
             return response
-        except (OktaLoginError, InvalidToken, ValueError, KeyError, TypeError, json.JSONDecodeError):
-            return Response("ログインを確認できませんでした。最初からやり直してください。", status_code=400)
+        except (
+            OktaLoginError,
+            InvalidToken,
+            ValueError,
+            KeyError,
+            TypeError,
+            json.JSONDecodeError,
+        ):
+            return Response(
+                "ログインを確認できませんでした。最初からやり直してください。", status_code=400
+            )
         except Exception:
-            return Response("ログインを確認できませんでした。最初からやり直してください。", status_code=400)
+            return Response(
+                "ログインを確認できませんでした。最初からやり直してください。", status_code=400
+            )
 
     async def _verify_id_token(self, token, metadata, expected_nonce):
         try:
@@ -247,11 +274,15 @@ class OktaOIDCLogin:
             if header.get("alg") != "RS256" or not isinstance(header.get("kid"), str):
                 raise OktaLoginError
             async with self.http_client_factory(timeout=10, follow_redirects=False) as client:
-                response = await client.get(metadata["jwks_uri"], headers={"accept": "application/json"})
+                response = await client.get(
+                    metadata["jwks_uri"], headers={"accept": "application/json"}
+                )
             if response.status_code != 200:
                 raise OktaLoginError
             jwks = response.json().get("keys", [])
-            matches = [jwt.PyJWK.from_dict(item) for item in jwks if item.get("kid") == header["kid"]]
+            matches = [
+                jwt.PyJWK.from_dict(item) for item in jwks if item.get("kid") == header["kid"]
+            ]
             if len(matches) != 1 or matches[0].algorithm_name != "RS256":
                 raise OktaLoginError
             claims = jwt.decode(
@@ -264,11 +295,17 @@ class OktaOIDCLogin:
                 leeway=60,
             )
             audience = claims.get("aud")
-            if isinstance(audience, list) and len(audience) > 1 and claims.get("azp") != self.client_id:
+            if (
+                isinstance(audience, list)
+                and len(audience) > 1
+                and claims.get("azp") != self.client_id
+            ):
                 raise OktaLoginError
             if claims.get("azp") is not None and claims.get("azp") != self.client_id:
                 raise OktaLoginError
-            if not isinstance(claims.get("nonce"), str) or not hmac.compare_digest(claims["nonce"], expected_nonce):
+            if not isinstance(claims.get("nonce"), str) or not hmac.compare_digest(
+                claims["nonce"], expected_nonce
+            ):
                 raise OktaLoginError
             return claims
         except Exception as error:
@@ -310,5 +347,7 @@ class OktaOIDCLogin:
                     session["revoked"] = True
                     records.put(key, session)
         response = Response(status_code=204)
-        response.delete_cookie("expense_session", path="/", secure=True, httponly=True, samesite="lax")
+        response.delete_cookie(
+            "expense_session", path="/", secure=True, httponly=True, samesite="lax"
+        )
         return response

@@ -8,10 +8,9 @@ from urllib.parse import parse_qs, urlsplit
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
-from starlette.requests import Request
-
 from runtime.auth_store import SQLiteAuthorizationStore
 from runtime.okta_oidc import OktaOIDCLogin
+from starlette.requests import Request
 
 
 class _Response:
@@ -100,7 +99,9 @@ class OktaOIDCLoginTests(unittest.IsolatedAsyncioTestCase):
         return jwt.encode(claims, self.private_key, algorithm="RS256", headers={"kid": "test-key"})
 
     def authorize_request(self):
-        query = "client_id=sa&redirect_uri=https%3A%2F%2Fsa.example.test%2Fcallback&state=client-state"
+        query = (
+            "client_id=sa&redirect_uri=https%3A%2F%2Fsa.example.test%2Fcallback&state=client-state"
+        )
         scope = {
             "type": "http",
             "method": "GET",
@@ -144,19 +145,25 @@ class OktaOIDCLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query["code_challenge_method"], ["S256"])
         response = await self.callback_request(query["state"][0])
         self.assertEqual(response.status_code, 303)
-        self.assertTrue(response.headers["location"].startswith(self.app_origin + "/oauth/authorize?"))
+        self.assertTrue(
+            response.headers["location"].startswith(self.app_origin + "/oauth/authorize?")
+        )
         self.assertIn("Secure", response.headers["set-cookie"])
         self.assertIn("HttpOnly", response.headers["set-cookie"])
         self.assertIn("SameSite=lax", response.headers["set-cookie"])
         cookie = SimpleCookie()
         cookie.load(response.headers["set-cookie"])
         session_id = cookie["expense_session"].value
-        request = Request({"type": "http", "headers": [(b"cookie", f"expense_session={session_id}".encode())]})
+        request = Request(
+            {"type": "http", "headers": [(b"cookie", f"expense_session={session_id}".encode())]}
+        )
         person = self.adapter.verify_login(request)
         self.assertEqual(person.tenant_id, "tenant-10")
         self.assertEqual(person.person_id, "person-canonical-1")
         self.assertEqual(self.resolved, [("tenant-10", self.issuer, "okta-sub-1")])
-        self.assertEqual(self.token_request["data"]["redirect_uri"], self.app_origin + "/login/callback")
+        self.assertEqual(
+            self.token_request["data"]["redirect_uri"], self.app_origin + "/login/callback"
+        )
         self.assertGreaterEqual(len(self.token_request["data"]["code_verifier"]), 43)
 
     async def test_logout_revokes_server_session_and_clears_cookie(self):

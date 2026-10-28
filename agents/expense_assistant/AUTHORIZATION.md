@@ -57,6 +57,10 @@ Nowcast等の既存アプリ用schema・DB role・接続文字列を共用せず
 専用runtime roleを用意する。`runtime/postgres_auth_schema.sql` はDB管理者が適用し、実行roleには
 このschemaのUSAGEとauth_records表のSELECT/INSERT/UPDATEだけを付与する。
 adapterは各操作をPostgres transactionで実行し、読み取った行をロックして一回限りコードの同時交換を防ぐ。
+未作成レコードへの同時アクセスも保護するため、schema単位のtransaction advisory lockを
+読み取り前に取得する。同一schemaの認証操作は直列化されるため、実配置では待ち時間・
+connection/statement timeoutも監視・設定する。合成モデルで競合とロールバックを検証しているが、
+実Neonでの接続・ロック・最小権限検証は別途必要。
 Neon pooled connection string等は配置先のSecret Managerから注入し、Git・ログ・クライアントへ出さない。
 DB/schema/roleの作成と権限設定はDB管理者が行う。既存Neonの接続文字列をそのまま流用しない。
 
