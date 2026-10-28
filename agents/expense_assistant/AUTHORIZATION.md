@@ -59,8 +59,18 @@ Nowcast等の既存アプリ用schema・DB role・接続文字列を共用せず
 adapterは各操作をPostgres transactionで実行し、読み取った行をロックして一回限りコードの同時交換を防ぐ。
 未作成レコードへの同時アクセスも保護するため、schema単位のtransaction advisory lockを
 読み取り前に取得する。同一schemaの認証操作は直列化されるため、実配置では待ち時間・
-connection/statement timeoutも監視・設定する。合成モデルで競合とロールバックを検証しているが、
-実Neonでの接続・ロック・最小権限検証は別途必要。
+connection/statement timeoutも監視・設定する。
+
+2026-10-28、承認済みのschema-only QAブランチに専用schemaとSQL作成のruntime roleを用意し、
+実Neonへの本人用ではない専用DB資格情報での接続を確認した。TLSはホスト名・証明書の両方を検証する
+`sslmode=verify-full` とCA bundleを明示する。資格情報はMacのOSキーチェーンに保存し、
+DB管理者の接続文字列はメモリ内のセットアップ処理だけに使用・保存しない。
+管理者属性・neon_superuser所属なし、対象表のSELECT/INSERT/UPDATEのみ、DELETE不可、
+他の非システム表へのデータアクセス権限0を確認した。
+専用roleでINSERT/UPDATE/rollback、実ストアを通す合成OAuth codeの一回限り交換・refresh・失効を確認し、
+この試験で作成した合成認証レコードは削除した。本番データのコピー・MFの参照や書き込みは行っていない。
+これは実Oktaログイン・実社員の同意・公開ホスト・実MFへの接続成功ではない。
+Neon ConsoleのownerからのSET ROLE試験は拒否されたため、権限を広げず専用資格情報の直接接続で検証した。
 
 `test_postgres_local.py` には、使い捨てのloopback PostgreSQL専用の実DBテストがある。
 `EXPENSE_SYNTHETIC_POSTGRES_DSN` を明示したときだけ実行し、hostが `127.0.0.1`、
@@ -77,6 +87,16 @@ DB/schema/roleの作成と権限設定はDB管理者が行う。既存Neonの接
 使用済み更新トークンのハッシュは再利用検出に必要なので、有効な系列の履歴を安易に削除しない。
 
 ## 信頼済み配置コードから組み立てる
+
+`authorization_host.py` の `create_host(settings, resolve_person=..., resolve_connection=...)` は、
+下記の組み立てを一つの入口にする。公開メタデータは固定の配置設定、秘密は専用の
+`EXPENSE_AUTH_DATABASE_URL` / `EXPENSE_OKTA_CLIENT_SECRET` / `EXPENSE_OKTA_STATE_KEY` から
+`settings_from_environment` で読み込める。`DATABASE_URL` や単一ownerの環境変数へフォールバックしない。
+identity link・本人別サービスのresolverはどちらも必須で、未設定なら起動を拒否する。
+DSNは明示のhost/database/user/passwordと `sslmode=verify-full` を要求し、設定のreprに秘密を含めない。
+同じPostgres storeをOkta sessionとOAuth authorityで使用し、同じauthorityと本人別resolverを
+初回の会社別明細作成同意にも接続する。DDLやMF書き込みは起動処理に含めない。
+このfactoryの同梱・合成HTTPテスト成功は、実Okta設定や公開ホストへの配置完了ではない。
 
 ```python
 import os
