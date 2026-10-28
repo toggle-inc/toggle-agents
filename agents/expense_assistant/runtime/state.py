@@ -84,6 +84,9 @@ class State:
         self.db.execute("""CREATE TABLE IF NOT EXISTS external_approval_events (
             source TEXT NOT NULL, event_id TEXT NOT NULL, preview_id TEXT NOT NULL,
             digest TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(source,event_id))""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS source_receipts (
+            source TEXT NOT NULL, scope_digest TEXT NOT NULL, reference TEXT NOT NULL,
+            metadata TEXT NOT NULL, PRIMARY KEY(source,scope_digest,reference))""")
 
     @synchronized
     def preview(self, action, office, snapshot, *, lifetime=600):
@@ -178,6 +181,32 @@ class State:
             if self.db.in_transaction:
                 self.db.execute("ROLLBACK")
             raise
+
+    @synchronized
+    def bind_source_receipt(self, source, scope_digest, reference, metadata):
+        """Trusted attachment importer only; immutable origin/receipt evidence."""
+        encoded = json.dumps(metadata, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        self.db.execute(
+            "INSERT OR IGNORE INTO source_receipts VALUES (?,?,?,?)",
+            (source, scope_digest, reference, encoded),
+        )
+        row = self.db.execute(
+            "SELECT metadata FROM source_receipts "
+            "WHERE source=? AND scope_digest=? AND reference=?",
+            (source, scope_digest, reference),
+        ).fetchone()
+        if row is None or row[0] != encoded:
+            raise ExpenseError("領収書の取得元の対応が変わっています。")
+
+    @synchronized
+    def source_receipt(self, source, scope_digest, reference):
+        """Trusted host only. A different run/origin cannot reuse this evidence."""
+        row = self.db.execute(
+            "SELECT metadata FROM source_receipts "
+            "WHERE source=? AND scope_digest=? AND reference=?",
+            (source, scope_digest, reference),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
 
     @synchronized
     def withdraw_unused_approval(self, identifier):

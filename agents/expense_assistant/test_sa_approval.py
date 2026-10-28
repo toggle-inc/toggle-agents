@@ -13,7 +13,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_runtime as fixtures  # noqa: E402
 from runtime.sa_approval import SAApprovalAdapter  # noqa: E402
-from runtime.state import ExpenseError  # noqa: E402
+from runtime.state import ExpenseError, digest  # noqa: E402
 
 
 class SAApprovalTests(unittest.TestCase):
@@ -83,6 +83,18 @@ class SAApprovalTests(unittest.TestCase):
             args["receipt_path"] = self.fixture.files.save(
                 b"%PDF-1.4\nsynthetic receipt", "application/pdf"
             )["path"]
+            self.service.state.bind_source_receipt(
+                self.adapter.origin,
+                digest(self.scope),
+                args["receipt_path"],
+                {
+                    "id": "synthetic-file",
+                    "filename": "synthetic.pdf",
+                    "contentType": "application/pdf",
+                    "size": len(b"%PDF-1.4\nsynthetic receipt"),
+                    "sha256": hashlib.sha256(b"%PDF-1.4\nsynthetic receipt").hexdigest(),
+                },
+            )
         self.preview = self.service.mf_create_transaction(**args)
         return self.adapter.propose(self.preview["preview_id"])
 
@@ -234,6 +246,9 @@ class SAApprovalTests(unittest.TestCase):
             "approve",
             "approve_external",
             "withdraw_unused_approval",
+            "bind_source_receipt",
+            "source_receipt",
+            "fetch",
         ):
             with self.subTest(method=method), self.assertRaises(ExpenseError):
                 self.service.call(method, {})

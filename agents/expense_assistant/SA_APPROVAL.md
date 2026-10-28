@@ -29,6 +29,29 @@ SAの画面・権限判定をここに複製せず、正本の明細内容を不
 金融書き込みの台帳・重複防止・MF読戻しは既存の経費本体をそのまま使う。
 SAの承認APIが金融書き込みを行うわけではなく、通常のHarness実行承認とも別の仕組み。
 
+## 起点添付の取り込み
+
+`runtime/sa_attachment.py` の `SAAttachmentAdapter` を信頼済みホストで使う。
+scope/verify_scope/credential/httpは承認アダプターと同じ契約で、さらにホストが確認した
+起点の確定manifest（id/filename/contentType/size）をコンストラクターへ渡す。
+manifestやscopeをLLMの本文から作ってはいけない。
+
+`fetch(attachment_id)` はmanifest内の1件だけを固定originの認可付き添付APIからGETする。
+ID・percent-encoded filename・MIME・Content-Length・SHA256と実bytesを照合し、
+ネットワーク前後の本人とscopeも再確認する。転送・別投稿探索・任意URL・秘密の転送はしない。
+SAは25MiBまで転送できるが、経費本体の既存上限10MiBは変更せず、超過は取得前に拒否する。
+PDF/PNG/JPEG/HEICのみを既存Receipts.saveのバイナリ形式確認に通す。完全なPDF/画像構文の
+安全性検査やOCR実行をこの取込みだけで完了と扱わない。
+
+取得元のorigin・全scopeのdigest・添付ID/名前/MIME/サイズ/hashと、本人用receipt参照の対応を
+本人用SQLiteへ不変保存する。承認提案時もその対応を照合し、`source_attachments` に含める。
+別のrun・originの領収書や未紐付けの参照で確認画面を生成しない。
+過去版で作成済みのSA確認内容は書き換えず、新しいpreviewでこの契約を使う。
+
+添付adapterと承認adapterはホスト向けAPIであり、既存のLLM用fetch_attachment(url)へ
+サービス資格情報を付加して公開するものではない。ホストで取得済みreceipt参照だけを
+必要な本人限定の実行に渡す。MFのOAuth資格情報も取得・コピー・変更しない。
+
 ## 検証段階と未接続部分
 
 合成SA HTTPと実SQLite台帳によるテストで、本人・scope・版・期限・内容・event再利用・
@@ -39,7 +62,7 @@ SAの承認APIが金融書き込みを行うわけではなく、通常のHarnes
 1. SA側の対象Previewへのコード・DB・最小サービス資格情報の配置。
 2. 実行ホストでのcanonical本人対応と新しい起点/run/version scopeの解決。
 3. 認可付き添付取得と、SA添付ID・画像ハッシュ・本人用receipt参照の対応付け。
-   現在の承認アダプターだけではSAから画像を取り込んだ証明にならない。
+   source-owned adapterと合成回帰は実装済み。SA Preview上の実取得との結合は未検証。
 4. 常設の信頼済みホストでのpropose→本人UI→readback→実行の接続。
 5. 本人が会社・内容を承認した実在経費で、MF結果まで実機照合。
 

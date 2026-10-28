@@ -13,7 +13,7 @@ import re
 import time
 from urllib.parse import quote, urlsplit
 
-from .state import ExpenseError
+from .state import ExpenseError, digest
 
 SCOPE_KEYS = {
     "invocationId",
@@ -166,6 +166,22 @@ class SAApprovalAdapter:
             or not self.clock() < details["expires_at"] <= self.clock() + 3600
         ):
             raise ExpenseError("本人確認の対象・期限・状態を確認してください。")
+        attachments = []
+        reference = details["snapshot"].get("intent", {}).get("receipt_path")
+        if reference:
+            source = self.service.state.source_receipt(self.origin, digest(self.scope), reference)
+            payload_receipt = details["snapshot"]["payload"]
+            if details["action"] != "upload":
+                payload_receipt = payload_receipt.get("receipt_input", {})
+            visible = _visible(payload_receipt)
+            if (
+                source is None
+                or source.get("sha256") != visible.get("content_sha256")
+                or source.get("size") != visible.get("bytes")
+                or source.get("contentType") != visible.get("content_type")
+            ):
+                raise ExpenseError("領収書と今回の起点添付の対応を確認できません。")
+            attachments.append(source)
         payload = _json(
             {
                 "protocol": "expense-human-preview/v1",
@@ -174,6 +190,7 @@ class SAApprovalAdapter:
                 "office_id": details["office"],
                 "snapshot": _visible(details["snapshot"]),
                 "preview_digest": details["preview_digest"],
+                "source_attachments": attachments,
             }
         )
         if len(payload.encode("utf-8")) > 128000:
