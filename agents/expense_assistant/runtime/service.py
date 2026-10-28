@@ -6,9 +6,10 @@ import decimal
 import inspect
 import re
 import threading
+from contextvars import ContextVar
 from zoneinfo import ZoneInfo
 
-from .state import ExpenseError, OutcomeUnknownError
+from .state import ExpenseError, OutcomeUnknownError, digest
 
 ORIGINAL_TOOLS = (
     "mf_auth_url",
@@ -44,6 +45,9 @@ def compact(transaction):
         "in_report": bool(transaction.get("ex_report")),
         "has_file": bool(transaction.get("mf_file")),
         "warning": transaction.get("warning_message") or transaction.get("error_message"),
+        "invoice_registration_number": transaction.get("invoice_registration_number"),
+        "automatic_status": transaction.get("automatic_status"),
+        "receipt_file_id": (transaction.get("mf_file") or {}).get("id"),
     }
 
 
@@ -61,6 +65,13 @@ def amount(value, *, allow_zero=False):
     return int(number) if number == int(number) else float(number)
 
 
+def invoice_number(value):
+    """Validate transcription shape only, not issuer registration or tax eligibility."""
+    if not isinstance(value, str) or (value and not re.fullmatch(r"T[0-9]{13}", value)):
+        raise ExpenseError("登録番号はTと半角数字13桁で指定し、不明なら空欄にしてください。")
+    return value
+
+
 def form(office, fields, *, warnings, sources, item_options, receipt=""):
     """A neutral draft UI contract; renderers never authorize a write by themselves."""
     meal = any(
@@ -76,6 +87,7 @@ def form(office, fields, *, warnings, sources, item_options, receipt=""):
         ("ex_item_name", "経費科目", "select", True),
         ("report_number", "事前申請番号", "text", False),
         ("memo", "メモ", "text_long", transit),
+        ("invoice_registration_number", "適格請求書発行事業者登録番号", "text", False),
     ]
     if meal:
         definitions += [
@@ -142,16 +154,26 @@ class ExpenseService:
         policy=None,
         aliases=None,
         references=None,
+        write_enabled=False,
     ):
         if getattr(mf, "owner", None) != state.owner:
             raise ExpenseError("MF認証と状態の本人が一致しません。")
         self.mf, self.state = mf, state
         self.calendar, self.fares, self.receipts, self.policy = calendar, fares, receipts, policy
         self.aliases, self.references = aliases or {}, references
+        self.write_enabled = write_enabled is True
         self._lock = threading.RLock()
+        self._draft_guard = ContextVar("expense_draft_consent", default=None)
 
     def call(self, operation, arguments):
-        operations = ORIGINAL_TOOLS + ("expense_context", "propose_teaching", "read_reference")
+        operations = ORIGINAL_TOOLS + (
+            "delivery_contract",
+            "expense_context",
+            "propose_teaching",
+            "read_reference",
+            "mf_receipt_status",
+            "mf_save_draft",
+        )
         if operation not in operations or not isinstance(arguments, dict):
             raise ExpenseError("未対応の経費操作です。")
         method = getattr(self, operation)
@@ -195,12 +217,58 @@ class ExpenseService:
             raise ExpenseError("本人の対象明細を確認できません。")
         if matches[0].get("ex_report"):
             raise ExpenseError("申請に含まれている明細は変更・削除しません。")
+        if matches[0].get("automatic_status") not in {
+            "manual",
+            "input_done",
+        }:
+            raise ExpenseError(
+                "OCR処理中または状態未確認の明細は変更・削除せず、読取結果を待って確認します。"
+            )
         return matches[0]
 
     def _require(self, provider, name):
         if provider is None:
             raise ExpenseError(f"{name}が未接続です。設定を確認してください。")
         return provider
+
+    def _verify_written_transaction(self, office, identifier, payload):
+        """Read the exact personal record; a POST/PUT acknowledgement is not verification."""
+        try:
+            response = self.mf.get_transaction(office, identifier)
+            transaction = response.get("ex_transaction", response)
+            if not isinstance(transaction, dict) or transaction.get("id") != identifier:
+                raise ValueError("wrong transaction")
+            fields = sorted(
+                set(payload)
+                & {
+                    "recognized_at",
+                    "value",
+                    "remark",
+                    "memo",
+                    "ex_item_id",
+                    "report_number",
+                    "project_id",
+                    "dept_id",
+                    "invoice_registration_number",
+                }
+            )
+            for key in fields:
+                if key not in transaction:
+                    raise ValueError("readback field missing")
+                actual, expected = transaction.get(key), payload[key]
+                if key == "value" and type(actual) not in (int, float):
+                    raise ValueError("invalid amount in readback")
+                # MF may represent clearing an optional text field as null.
+                if actual != expected and not (expected == "" and actual is None):
+                    raise ValueError("readback mismatch")
+            if payload.get("receipt_input") and not transaction.get("mf_file"):
+                raise ValueError("receipt attachment not yet visible")
+            return transaction, fields
+        except Exception as error:
+            raise OutcomeUnknownError(
+                "MFへの書き込み後の照合が完了していません。実際の明細を確認してください。"
+                "書き込みを自動再送しません。"
+            ) from error
 
     def mf_auth_url(self):
         return self.mf.authorize_url()
@@ -376,6 +444,8 @@ class ExpenseService:
         if type(confirm) is not bool:
             raise ExpenseError("confirmは真偽値で指定してください。")
         if confirm:
+            if not self.write_enabled:
+                raise ExpenseError("この実接続は読み取り専用です。書き込みは別途承認が必要です。")
             if not preview_id:
                 raise ExpenseError("本人に示したプレビューと承認が必要です。")
             completed = self.state.completed(preview_id, action, company["id"], intent)
@@ -383,15 +453,24 @@ class ExpenseService:
                 return completed
         snapshot, display = prepare()
         snapshot["intent"] = intent
+        snapshot["office"] = {"id": company["id"], "name": company["name"]}
         if not confirm:
             return {**display, **self.state.preview(action, company["id"], snapshot)}
         if "form" in snapshot and not snapshot["form"]["ready"]:
             raise ExpenseError(
                 "不足・推測の項目があります。本人に確認してプレビューを修正してください。"
             )
-        return self.state.execute(
-            preview_id, action, company["id"], snapshot, lambda: execute(snapshot)
-        )
+
+        def run():
+            expected_consent = self._draft_guard.get()
+            if (
+                expected_consent is not None
+                and self.state.draft_consent(company["id"]) != expected_consent
+            ):
+                raise ExpenseError("初回の許可が変更・解除されたため、保存を止めました。")
+            return execute(snapshot)
+
+        return self.state.execute(preview_id, action, company["id"], snapshot, run)
 
     def mf_create_transaction(
         self,
@@ -414,6 +493,7 @@ class ExpenseService:
         sources=None,
         ex_item_options=None,
         preview_id="",
+        invoice_registration_number="",
     ):
         company = self._office(office)
         intent = {
@@ -423,6 +503,7 @@ class ExpenseService:
         }
 
         def prepare():
+            invoice_number(invoice_registration_number)
             parsed_date = dt.date.fromisoformat(recognized_at)
             if (
                 parsed_date
@@ -456,6 +537,7 @@ class ExpenseService:
                         ("report_number", report_number),
                         ("project_id", project_id),
                         ("dept_id", dept_id),
+                        ("invoice_registration_number", invoice_registration_number),
                     )
                     if val
                 }
@@ -484,6 +566,7 @@ class ExpenseService:
                 "other_count": other_count,
                 "own_names": own_names,
                 "other_names": other_names,
+                "invoice_registration_number": invoice_registration_number,
             }
             shown = {key: val for key, val in payload.items() if key != "receipt_input"}
             if receipt_path:
@@ -502,6 +585,10 @@ class ExpenseService:
                 "warnings": warnings,
                 "form": draft,
             }
+            if receipt_path:
+                snapshot["receipt_fingerprint"] = digest(
+                    {key: payload["receipt_input"][key] for key in ("content", "content_type")}
+                )
             return snapshot, {
                 "preview": shown,
                 "office": company["name"],
@@ -517,10 +604,15 @@ class ExpenseService:
             transaction = response.get("ex_transaction", response)
             if not transaction.get("id"):
                 raise OutcomeUnknownError("作成結果を確認できません。MF明細を照合してください。")
+            transaction, verified = self._verify_written_transaction(
+                company["id"], transaction["id"], snapshot["payload"]
+            )
             return {
                 "created": True,
                 "transaction": compact(transaction),
                 "warnings": snapshot["warnings"],
+                "readback_verified": True,
+                "verified_fields": verified,
             }
 
         return self._write(
@@ -540,6 +632,7 @@ class ExpenseService:
         receipt_path="",
         confirm=False,
         preview_id="",
+        invoice_registration_number=None,
     ):
         company = self._office(office)
         intent = {
@@ -549,6 +642,8 @@ class ExpenseService:
         }
 
         def prepare():
+            if invoice_registration_number is not None:
+                invoice_number(invoice_registration_number)
             before = self._editable(company["id"], transaction_id)
             payload = {
                 key: val
@@ -558,6 +653,7 @@ class ExpenseService:
                     ("memo", memo),
                     ("report_number", report_number),
                     ("project_id", project_id),
+                    ("invoice_registration_number", invoice_registration_number),
                 )
                 if val is not None
             }
@@ -602,7 +698,15 @@ class ExpenseService:
             transaction = response.get("ex_transaction", response)
             if transaction.get("id") != transaction_id:
                 raise OutcomeUnknownError("更新結果を照合してください。")
-            return {"updated": True, "transaction": compact(transaction)}
+            transaction, verified = self._verify_written_transaction(
+                company["id"], transaction_id, snapshot["payload"]
+            )
+            return {
+                "updated": True,
+                "transaction": compact(transaction),
+                "readback_verified": True,
+                "verified_fields": verified,
+            }
 
         return self._write(
             "update", company, intent, prepare, execute, confirm=confirm, preview_id=preview_id
@@ -614,7 +718,12 @@ class ExpenseService:
 
         def prepare():
             payload = self._require(self.receipts, "領収書").payload(receipt_path, ocr=True)
-            return {"payload": payload}, {
+            return {
+                "payload": payload,
+                "receipt_fingerprint": digest(
+                    {key: payload[key] for key in ("content", "content_type")}
+                ),
+            }, {
                 "preview": {"receipt": payload["filename"], "office": company["name"], "ocr": True},
                 "uploaded": False,
             }
@@ -629,6 +738,155 @@ class ExpenseService:
         return self._write(
             "upload", company, intent, prepare, execute, confirm=confirm, preview_id=preview_id
         )
+
+    def mf_receipt_status(self, upload_preview_id):
+        """Read only: follow exact MF receipt/transaction IDs saved by an approved upload."""
+        details = self.state.preview_details(upload_preview_id)
+        if details["action"] != "upload":
+            raise ExpenseError("領収書OCRアップロードの確認IDを指定してください。")
+        company = self._office(details["office"])
+        base = {
+            "ocr_complete": False,
+            "human_confirmation_required": True,
+            "transactions": [],
+            "writes_performed": 0,
+        }
+        if details["status"] != "done":
+            return {
+                **base,
+                "status": "not_submitted" if details["status"] == "preview" else "outcome_unknown",
+            }
+        response = (details["result"] or {}).get("result")
+        if not isinstance(response, dict):
+            return {**base, "status": "uncorrelated"}
+
+        def identifiers(key):
+            rows = response.get(key, [])
+            if not isinstance(rows, list) or len(rows) > 20:
+                raise ExpenseError("OCR受付結果の対象を安全に照合できません。")
+            values = []
+            for row in rows:
+                identifier = row.get("id") if isinstance(row, dict) else None
+                if not isinstance(identifier, str) or not re.fullmatch(
+                    r"[A-Za-z0-9_-]{1,200}", identifier
+                ):
+                    raise ExpenseError("OCR受付結果の対象IDを確認できません。")
+                if identifier in values:
+                    raise ExpenseError("OCR受付結果の対象が重複しています。")
+                values.append(identifier)
+            return values
+
+        file_ids, transaction_ids = identifiers("mf_files"), identifiers("ex_transactions")
+        if transaction_ids:
+            rows = []
+            for identifier in transaction_ids:
+                result = self.mf.get_transaction(company["id"], identifier)
+                row = result.get("ex_transaction", result)
+                if not isinstance(row, dict) or row.get("id") != identifier:
+                    raise ExpenseError("OCRの明細を照合できません。")
+                rows.append(row)
+            if file_ids and any(
+                (row.get("mf_file") or {}).get("id") not in file_ids for row in rows
+            ):
+                raise ExpenseError("OCRの明細と領収書の対応を確認できません。")
+        elif file_ids:
+            rows = [
+                row
+                for row in self._transactions(company["id"])
+                if (row.get("mf_file") or {}).get("id") in file_ids
+            ]
+        else:
+            return {**base, "status": "uncorrelated"}
+        if not rows:
+            return {**base, "status": "awaiting_transaction"}
+        if len(rows) > 20 or len({row.get("id") for row in rows}) != len(rows):
+            raise ExpenseError("OCRの関連明細を一意に照合できません。")
+        states = {row.get("automatic_status") for row in rows}
+        if (
+            any(row.get("error_message") or row.get("warning_message") for row in rows)
+            or "canceled" in states
+        ):
+            status = "needs_review"
+        elif file_ids and not set(file_ids).issubset(
+            {(row.get("mf_file") or {}).get("id") for row in rows}
+        ):
+            status = "awaiting_transaction"
+        elif states == {"input_done"}:
+            status = "input_complete"
+        elif states.issubset(
+            {
+                "waiting_for_ocr_input",
+                "waiting_for_streamed_upload",
+                "waiting_for_streamed_input",
+                "waiting_for_input",
+                "input_done",
+            }
+        ):
+            status = "processing"
+        else:
+            status = "unverified"
+        return {
+            **base,
+            "status": status,
+            "ocr_complete": status == "input_complete",
+            "transactions": [compact(row) for row in rows],
+        }
+
+    def mf_save_draft(self, preview_id):
+        """Save a prepared create/upload under initial person+office consent, no custom UI.
+
+        The preview is an internal immutable candidate, NOT a per-item user
+        confirmation screen. Host-only consent and fresh per-person capability
+        checks are still required. No update/delete/submission is authorized.
+        """
+        with self._lock:
+            details = self.state.preview_details(preview_id)
+            if details["action"] not in {"create", "upload"}:
+                raise ExpenseError("この許可では未申請明細の作成と領収書OCR送信だけを行えます。")
+            consent = self.state.draft_consent(details["office"])
+            if not self.write_enabled:
+                raise ExpenseError("現在の接続は読み取り専用です。")
+            operation = (
+                "mf_create_transaction" if details["action"] == "create" else "mf_upload_receipt"
+            )
+            if details["status"] == "preview":
+                self.state.approve_external(
+                    "expense-draft-consent/v1",
+                    consent["consent_id"] + ":" + preview_id,
+                    preview_id,
+                    details["preview_digest"],
+                    {"consent": consent, "preview_digest": details["preview_digest"]},
+                )
+            handle = self._draft_guard.set(consent)
+            try:
+                result = self.call(
+                    operation,
+                    {
+                        **details["snapshot"]["intent"],
+                        "confirm": True,
+                        "preview_id": preview_id,
+                    },
+                )
+            finally:
+                self._draft_guard.reset(handle)
+                self.state.withdraw_unused_approval(preview_id)
+            return {
+                **result,
+                "review_url": "https://expense.moneyforward.com/transactions",
+                "review_link_kind": "transaction_list",
+                "review_company": (details["snapshot"].get("office") or {}).get(
+                    "name", details["office"]
+                ),
+                "review_office_id": details["office"],
+                "draft_status": "saved_unsubmitted"
+                if details["action"] == "create"
+                else "ocr_processing",
+                "submitted": False,
+                "next_step": (
+                    "MFの会社選択を確認し、明細一覧で内容を確認・修正してから"
+                    "本人が申請してください。"
+                ),
+            }
 
     def mf_delete_transaction(self, office, transaction_id, confirm=False, preview_id=""):
         company = self._office(office)
@@ -665,6 +923,7 @@ class ExpenseService:
                 "rules": self.policy is not None,
                 "submission": False,
                 "live_connection_verified": False,
+                "write_enabled": self.write_enabled,
             },
             "constraints": [
                 "human_approval_required",
@@ -674,6 +933,12 @@ class ExpenseService:
                 "teachings_cannot_override_safety",
             ],
         }
+
+    def delivery_contract(self):
+        """Static contract only; safe to inspect before any business-tool results."""
+        from .delivery import load_contract
+
+        return load_contract()
 
     def propose_teaching(self, kind, content, due_date=""):
         return self.state.propose_fact(kind, content, due_date)

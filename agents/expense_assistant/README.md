@@ -9,7 +9,15 @@
 
 **現在の全機能の対応表と実行方法は [RUNTIME.md](RUNTIME.md) が正本です。**
 経費アシスタントの16業務ツール、本人別の状態・記憶、承認台帳、ローカルMCPの入口を実装しています。
-合成データでの検証と実アカウントの接続検証は区別します。実MFの読み書きは未検証です。
+合成テストと利用環境ごとの実アカウント接続検証は区別します。実MF書き込みは未検証です。
+月末の少人数試用の受入条件と担当境界は [PILOT.md](PILOT.md) に整理しています。
+新規明細の標準フローは、初回の本人・会社別の許可後に未申請明細を保存し、
+本人専用返信のMFリンクで確認する形です。毎回の独自確認画面は使いません。
+契約・検証済み範囲・未接続部分は [DRAFT_REVIEW.md](DRAFT_REVIEW.md) を参照してください。
+
+既存の本人用設定へ接続する `connect.py` を追加しています。
+接続時は読み取り専用が既定で、秘密を複製せず既存認証を参照します。
+ローカルの実接続検査とSA／Engineへの結合は別の段階です。
 
 予定・確認済み駅・運賃情報から、出典と未確認事項付きの交通費候補を作る
 プラットフォーム非依存の純粋関数を追加しました。`python3 preview.py --demo` で、
@@ -23,6 +31,8 @@
 - `tools.json` / `skills.json`：能力の宣言
 - `qa.json`：合成の検証ケース
 - `deploy.py`：このフォルダだけから配置パッケージを生成（通信なし）
+- `delivery.json`：本人専用配送の正本。SA/Buzz/Codexの個人チャットと論理接続能力の対応も保持
+- `runtime/delivery.py`：契約の検証・配送先種別の解決。秘密・環境固有IDは含めない
 - `test_deploy.py`：定義・単独コピー・生成物・誤設定拒否のテスト
 
 ## 検証とパッケージ作成
@@ -54,31 +64,66 @@ python3 deploy.py --tenant-id <配置先テナントID> --agent-id <既存エー
 CLI・実行基盤・その資格情報は外部依存です。「フォルダ単独」はこれらを内蔵する意味ではありません。
 配置先の権限・CI必須ルールは維持してください。CI限定の環境へローカルから直接配置しません。
 
+CLIのソース収集はGitの除外設定に従うため、Git管理下の `.deploy/` を直接composeすると
+実行コードが保存されません。生成済みパッケージをGitの外へコピーして使います。
+配置後も、この一時フォルダの配置ID・版情報を保持してください。
+
+```sh
+agent_deploy_stage=$(mktemp -d /tmp/toggle-agent-compose.XXXXXX)
+cp -R .deploy/candidate "$agent_deploy_stage/package"
+```
+
 まず公式CLIで計画を確認します（API書き込みなし）。
 
 ```sh
-agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID> --dry-run
+agentize-dev-cli managed-agent compose --root "$agent_deploy_stage/package" --tenant-id <配置先テナントID> --deterministic --standard-tools --dry-run
 ```
 
 計画の接続先・テナント・既存エージェントIDを確認し、配置が承認されている場合だけ実行します。
 
 ```sh
-agentize-dev-cli managed-agent compose --root .deploy/candidate --tenant-id <配置先テナントID>
+agentize-dev-cli managed-agent compose --root "$agent_deploy_stage/package" --tenant-id <配置先テナントID> --deterministic --standard-tools
 ```
 
 これはDRAFTの作成・更新です。公開・SA/Buzz/Codexへの接続は自動実行しません。
 新規作成では先に対象テナントに同じエージェントがないか確認してください。
 失敗・タイムアウト・結果不明の場合は再送せず、管理画面と生成された配置情報で確認します。
 配置成功後も、実LLMで検証ケースを評価し、版・指示・能力をreadbackで照合してください。
+`allow_ask_human=false`、`memory_mode=off`、接続ID、指示本文、同梱ソースのハッシュを照合します。
+通常composeで既定値が残るCLI版では、本人の質問設定まで正本どおりとは扱いません。
+差分だけを許可したCAS更新または検証済みのdeterministic配置経路を使い、再度readbackします。
 公開はその後の別承認です。パッケージ生成・dry-run・DRAFT作成を実機動作成功とは扱いません。
 
 ## 現在の制限
 
-ランタイムの実装と模擬サービスでの検証を進めています。実アカウントの接続・実機検証は未完了です。
+ランタイムの実装と模擬サービスの検証に加え、本人専用の実接続と個別承認付き書き込みの有効化手順を提供しています。
+実アカウントの検証結果は環境ごとに管理し、認証情報や実データはGitへ記録しません。
 このパッケージの配置だけでは、MCPサーバーや本人の認証設定は作成されません。
+Engine接続用の認証付きHTTP入口は `engine_mcp.py` で起動します。テナント10・本人の管理画面テストに限定した
+最大24時間の接続であり、複数社員への公開や常設クラウド化は別対応です。詳細は `RUNTIME.md` を参照してください。
 既に検証した本人専用のMCP接続は `--connection-id <接続ID>` で生成物へ指定できます。
 ランタイムソースも成果物へ収録します。接続IDを省略した場合、業務ツールは未接続のままです。
 現在のビルダーはツール・スキル未接続の定義だけを受け付けます。
 将来これらを追加した場合は、必要な実装・依存・テストをこのフォルダ内に収め、
 ビルダーも拡張してください。未対応の能力は黙って除外せずエラーにします。
 公開不能な規則・社員データ・秘密は同梱せず、実行環境から安全に注入します。
+
+## 依頼者別接続への移行
+
+### 会話履歴の共通基盤
+
+`_foundation/` は共通ソースから同梱した履歴読取コード・契約・合成テストです。
+`mcp_server.create_server(service, conversation_reader=reader)` で任意に履歴ツールを登録できます。
+`expense_context` の教え・保留とは別です。既存の業務ツール・認証・書き込み承認は変更しません。
+readerを省略すると未登録のままです。親・兄弟フォルダへの実行時依存はありません。
+ホストは依頼者・元会話・スレッド・現在の発言・実行IDを検証し、権限と取得版を返却直前に再検査します。
+個人情報の履歴・中間結果も `delivery.json` に従って本人専用に配送し、返信先DMを元会話と取り違えません。
+SA／Buzzの読取アダプターは `_foundation/history_sources.py` に同梱しています。
+本人の資格情報・既存入口との実接続と、この版の実機往復・配置はまだ行っていません。
+接続方法と制限は [_foundation/HISTORY_CONNECTIONS.md](_foundation/HISTORY_CONNECTIONS.md) を参照してください。
+
+複数社員が本人の権限で使うための設計・実装範囲は [MULTI_USER.md](MULTI_USER.md) を参照。
+現状の一人用MCP接続をそのまま共有してはいけません。
+
+認証・同意・トークンの正本もこのフォルダで管理します。
+配置先非依存の発行サービスと残る実接続の条件は [AUTHORIZATION.md](AUTHORIZATION.md) を参照。

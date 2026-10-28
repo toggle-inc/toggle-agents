@@ -75,6 +75,18 @@ class State:
         if "due_date" not in {row[1] for row in self.db.execute("PRAGMA table_info(facts)")}:
             self.db.execute("ALTER TABLE facts ADD COLUMN due_date TEXT")
         self.db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        # One receipt must not create multiple expenses through new previews,
+        # another company or switching between direct create and MF OCR upload.
+        # This DB is already bound to one verified human. Never auto-release an
+        # uncertain or completed claim, even after restart or preview expiry.
+        self.db.execute("""CREATE TABLE IF NOT EXISTS receipt_claims (
+            fingerprint TEXT PRIMARY KEY, preview_id TEXT NOT NULL UNIQUE)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS external_approval_events (
+            source TEXT NOT NULL, event_id TEXT NOT NULL, preview_id TEXT NOT NULL,
+            digest TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(source,event_id))""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS source_receipts (
+            source TEXT NOT NULL, scope_digest TEXT NOT NULL, reference TEXT NOT NULL,
+            metadata TEXT NOT NULL, PRIMARY KEY(source,scope_digest,reference))""")
 
     @synchronized
     def preview(self, action, office, snapshot, *, lifetime=600):
@@ -119,6 +131,144 @@ class State:
             raise ExpenseError("プレビューの内容・期限・状態を再確認してください。")
 
     @synchronized
+    def preview_details(self, identifier):
+        """Trusted host only: exact private snapshot, never an LLM tool/resource."""
+        row = self.db.execute(
+            "SELECT action,office,snapshot,hash,expires,status,result FROM previews WHERE id=?",
+            (identifier,),
+        ).fetchone()
+        if not row:
+            raise ExpenseError("本人の確認対象が見つかりません。")
+        action, office, raw, hashed, expires, status, result = row
+        snapshot = json.loads(raw)
+        if (
+            digest({"owner": self.owner, "action": action, "office": office, "snapshot": snapshot})
+            != hashed
+        ):
+            raise ExpenseError("本人の確認内容の整合性を確認できません。")
+        return {
+            "preview_id": identifier,
+            "preview_digest": hashed,
+            "expires_at": expires,
+            "action": action,
+            "office": office,
+            "snapshot": snapshot,
+            "status": status,
+            "result": json.loads(result) if result else None,
+        }
+
+    @synchronized
+    def approve_external(self, source, event_id, identifier, expected_digest, evidence):
+        """Trusted verifier only; persist immutable source-event evidence with approval."""
+        encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        expected = (identifier, expected_digest, encoded)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.db.execute(
+                "SELECT preview_id,digest,evidence FROM external_approval_events "
+                "WHERE source=? AND event_id=?",
+                (source, event_id),
+            ).fetchone()
+            if existing is not None and existing != expected:
+                raise ExpenseError("本人承認イベントが別の対象・内容に使われています。")
+            if existing is None:
+                self.db.execute(
+                    "INSERT INTO external_approval_events VALUES (?,?,?,?,?)",
+                    (source, event_id, *expected),
+                )
+            self.approve(identifier, expected_digest)
+            self.db.execute("COMMIT")
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    @synchronized
+    def bind_source_receipt(self, source, scope_digest, reference, metadata):
+        """Trusted attachment importer only; immutable origin/receipt evidence."""
+        encoded = json.dumps(metadata, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        self.db.execute(
+            "INSERT OR IGNORE INTO source_receipts VALUES (?,?,?,?)",
+            (source, scope_digest, reference, encoded),
+        )
+        row = self.db.execute(
+            "SELECT metadata FROM source_receipts "
+            "WHERE source=? AND scope_digest=? AND reference=?",
+            (source, scope_digest, reference),
+        ).fetchone()
+        if row is None or row[0] != encoded:
+            raise ExpenseError("領収書の取得元の対応が変わっています。")
+
+    @synchronized
+    def source_receipt(self, source, scope_digest, reference):
+        """Trusted host only. A different run/origin cannot reuse this evidence."""
+        row = self.db.execute(
+            "SELECT metadata FROM source_receipts "
+            "WHERE source=? AND scope_digest=? AND reference=?",
+            (source, scope_digest, reference),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    @synchronized
+    def withdraw_unused_approval(self, identifier):
+        """Host cleanup after refused execution; never release receipt/execution claims."""
+        self.db.execute(
+            "UPDATE previews SET approved=0 WHERE id=? AND status='preview'", (identifier,)
+        )
+
+    @synchronized
+    def set_draft_consent(self, office_ids, consent_id, *, active=True):
+        """Trusted first-consent UI/host only. Never an LLM tool or admin-user fallback.
+
+        The DB's fixed human owner consents to creating unsubmitted expenses and
+        OCR uploads in these offices until explicitly revoked. Not update/delete
+        or submission permission. No fixed expiry is imposed on this consent.
+        """
+        import re
+
+        if (
+            type(active) is not bool
+            or not isinstance(consent_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", consent_id)
+            or not isinstance(office_ids, list)
+            or len(office_ids) > 50
+            or (active and not office_ids)
+            or any(
+                not isinstance(x, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", x)
+                for x in office_ids
+            )
+            or len(office_ids) != len(set(office_ids))
+        ):
+            raise ExpenseError("本人の初回許可と会社範囲を確認してください。")
+        record = {
+            "owner": self.owner,
+            "consent_id": consent_id,
+            "office_ids": sorted(office_ids),
+            "active": active,
+            "actions": ["create", "upload"],
+        }
+        self.db.execute(
+            "INSERT INTO settings VALUES ('draft_creation_consent',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (json.dumps(record, sort_keys=True),),
+        )
+
+    @synchronized
+    def draft_consent(self, office):
+        row = self.db.execute(
+            "SELECT value FROM settings WHERE key='draft_creation_consent'"
+        ).fetchone()
+        record = json.loads(row[0]) if row else {}
+        if (
+            record.get("owner") != self.owner
+            or record.get("active") is not True
+            or office not in record.get("office_ids", [])
+            or record.get("actions") != ["create", "upload"]
+        ):
+            raise ExpenseError("この会社の未申請明細作成を初回の連携画面で許可してください。")
+        return record
+
+    @synchronized
     def execute(self, identifier, action, office, snapshot, write):
         hashed = digest(
             {"owner": self.owner, "action": action, "office": office, "snapshot": snapshot}
@@ -139,6 +289,33 @@ class State:
                 )
             if row[1] <= self.clock() or not row[3]:
                 raise ExpenseError("本人の有効な承認がありません。")
+            fingerprint = snapshot.get("receipt_fingerprint")
+            if fingerprint is not None:
+                if (
+                    action not in {"create", "upload"}
+                    or not isinstance(fingerprint, str)
+                    or len(fingerprint) != 64
+                    or any(c not in "0123456789abcdef" for c in fingerprint)
+                ):
+                    raise ExpenseError("領収書の照合情報を確認してください。")
+                prior = self.db.execute(
+                    "SELECT p.status FROM receipt_claims c "
+                    "LEFT JOIN previews p ON p.id=c.preview_id WHERE c.fingerprint=?",
+                    (fingerprint,),
+                ).fetchone()
+                if prior:
+                    if prior[0] == "done":
+                        raise ExpenseError(
+                            "同じ領収書は処理済みです。既存の明細・OCR結果を確認してください。"
+                            "新しいプレビューでも二重登録しません。"
+                        )
+                    raise OutcomeUnknownError(
+                        "同じ領収書の処理中または結果不明です。MF明細と照合してください。"
+                        "新しいプレビューでも自動再送しません。"
+                    )
+                self.db.execute(
+                    "INSERT INTO receipt_claims VALUES (?,?)", (fingerprint, identifier)
+                )
             self.db.execute("UPDATE previews SET status='executing' WHERE id=?", (identifier,))
             self.db.execute("COMMIT")
         except BaseException:
@@ -163,9 +340,13 @@ class State:
         row = self.db.execute(
             "SELECT action,office,snapshot,status,result FROM previews WHERE id=?", (identifier,)
         ).fetchone()
-        if row and row[3] == "done":
+        if row and row[3] in {"done", "executing", "unknown"}:
             if row[0] != action or row[1] != office or json.loads(row[2]).get("intent") != intent:
                 raise ExpenseError("完了した操作の本人・会社・内容と一致しません。")
+            if row[3] != "done":
+                raise OutcomeUnknownError(
+                    "前回の書き込み結果を照合してください。自動再送はしません。"
+                )
             return json.loads(row[4])
         return None
 

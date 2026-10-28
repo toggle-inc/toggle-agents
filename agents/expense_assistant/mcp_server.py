@@ -8,10 +8,19 @@ import importlib.util
 import inspect
 from pathlib import Path
 
+from _foundation.conversation import register_history_tool
 from runtime.service import ORIGINAL_TOOLS
 from runtime.state import ExpenseError
 
 DESCRIPTIONS = {
+    "mf_save_draft": (
+        "内部候補preview_idからMF未申請明細を保存しMF確認リンクを返す。"
+        "初回の本人・会社別許可が必要。毎回の独自確認画面は不要。既存修正・削除・提出は不可。"
+    ),
+    "delivery_contract": (
+        "Git正本の配送ルールとプラットフォーム別の非公開会話・接続能力の対応。"
+        "個人データは返さない。実接続の存在証明ではない。"
+    ),
     "mf_auth_url": "本人のMF OAuth連携を開始し許可URLを返す。トークンは返さない。",
     "mf_auth_complete": "本人のOAuth承認結果を保存する。秘密を回答や記憶に残さない。",
     "mf_offices": "認証した本人が所属する精算先会社の一覧。会社は必ず本人に確認する。",
@@ -25,11 +34,18 @@ DESCRIPTIONS = {
     "fetch_attachment": "許可された入口の添付URLを本人専用領収書参照へ変換する。",
     "mf_get_receipt": "本人の過去明細の領収書を読む。返るpathは不透明な参照でOSパスではない。",
     "mf_create_transaction": (
-        "明細案を作る。confirm=falseで本人に表示する。"
-        "信頼済み入口の承認後のみpreview_id付きconfirm=true。"
+        "明細の内部候補をconfirm=falseで作る。初回許可後はmf_save_draftで保存しMFリンクで確認。"
+        "従来のconfirm=trueは別経路の個別承認が必要。"
     ),
     "mf_update_transaction": "本人の未申請明細の修正。プレビューと別経路の本人承認が必要。",
-    "mf_upload_receipt": "領収書OCR登録。プレビューと本人承認が必要。OCR完了は一覧で確認。",
+    "mf_upload_receipt": (
+        "領収書OCR送信の内部候補をconfirm=falseで作る。初回許可後はmf_save_draftで送信。"
+        "OCR完了はmf_receipt_statusで照合する。"
+    ),
+    "mf_receipt_status": (
+        "本人が承認した領収書OCRの確認IDからMFの関連明細と読取状態を照合する。"
+        "読み取り専用。受付だけで完了と扱わない。"
+    ),
     "mf_delete_transaction": "本人の未申請明細を削除。プレビューと本人承認が必要。",
     "expense_context": "最初に本人の教えと設定済み能力を読む。接続検証の成功を意味しない。",
     "propose_teaching": (
@@ -39,11 +55,19 @@ DESCRIPTIONS = {
 }
 
 
-def create_server(service):
+def create_server(service, *, receipt_reader=None, conversation_reader=None):
     from mcp.server.mcpserver import MCPServer
 
     server = MCPServer("expense-assistant")
-    for name in ORIGINAL_TOOLS + ("expense_context", "propose_teaching", "read_reference"):
+    register_history_tool(server, conversation_reader)
+    for name in ORIGINAL_TOOLS + (
+        "delivery_contract",
+        "expense_context",
+        "propose_teaching",
+        "read_reference",
+        "mf_receipt_status",
+        "mf_save_draft",
+    ):
         method = getattr(service, name)
 
         def make_callback(operation, bound):
@@ -88,12 +112,20 @@ def create_server(service):
 
         def make_resource(expected):
             def read(reference: str) -> bytes:
-                with service._lock:
-                    files = service._require(service.receipts, "領収書")
-                    payload = files.payload("receipt:" + reference)
+                from mcp.server.mcpserver.exceptions import ResourceError
+
+                try:
+                    if receipt_reader is None:
+                        with service._lock:
+                            files = service._require(service.receipts, "領収書")
+                            payload = files.payload("receipt:" + reference)
+                    else:
+                        payload = receipt_reader("receipt:" + reference)
                     if payload["content_type"] != expected:
                         raise ExpenseError("領収書の形式が一致しません。")
                     return base64.b64decode(payload["content"])
+                except ExpenseError as error:
+                    raise ResourceError(str(error)) from None
 
             return read
 

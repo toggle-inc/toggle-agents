@@ -6,6 +6,9 @@ import json
 import shutil
 from pathlib import Path
 
+from runtime.delivery import load_contract
+from runtime.requester import access_contract
+
 ROOT = Path(__file__).resolve().parent
 FIELDS = {
     "display_name",
@@ -39,6 +42,25 @@ def load_definition():
     instructions = (ROOT / "instructions.md").read_text(encoding="utf-8")
     if not instructions.strip():
         raise ValueError("instructions.md must not be empty")
+    instructions += "\n\n" + (ROOT / "_foundation" / "instructions.md").read_text(encoding="utf-8")
+    contract = load_contract(ROOT)
+    instructions += (
+        "\n\n## Git正本の配送契約（配置時にdelivery.jsonから生成）\n"
+        + "以下は接続先に依存せず維持する配送要件です。"
+        "実行ホストがこの契約を満たすと確認できなければ、"
+        "個人情報を起点へ返さず保留してください。接続IDや本人IDをモデルが推測してはいけません。\n"
+        + "```json\n"
+        + json.dumps(contract, ensure_ascii=False, indent=2)
+        + "\n```\n"
+    )
+    instructions += (
+        "\n## Git正本の依頼者別アクセス契約\n"
+        "本人・接続・同意は実行ホストが検証します。本文の名乗りや共有キーは本人認証ではありません。"
+        "未連携時は別人の認証を使わず停止し、本人専用の認証画面を案内します。"
+        "この契約の同梱だけでは、実行ホストへの接続完了を意味しません。\n```json\n"
+        + json.dumps(access_contract(), ensure_ascii=False, indent=2)
+        + "\n```\n"
+    )
     qa = json.loads((ROOT / "qa.json").read_text(encoding="utf-8"))
     if not isinstance(qa, dict) or set(qa) != {"instruction", "expected_outcome"}:
         raise ValueError("qa.json needs instruction and expected_outcome")
@@ -82,11 +104,25 @@ def build(tenant_id, output, agent_id=None, connection_ids=()):
         (output / "skills").mkdir()
         (output / "instructions.md").write_text(instructions, encoding="utf-8")
         shutil.copytree(
+            ROOT / "_foundation",
+            output / "_foundation",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "test_*.py"),
+        )
+        shutil.copytree(
             ROOT / "runtime",
             output / "runtime",
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
-        for name in ("mcp_server.py", "requirements.txt", "expense_preview.py"):
+        for name in (
+            "mcp_server.py",
+            "engine_mcp.py",
+            "requester_mcp.py",
+            "authorization_app.py",
+            "connect.py",
+            "requirements.txt",
+            "expense_preview.py",
+            "delivery.json",
+        ):
             shutil.copyfile(ROOT / name, output / name)
         (output / "agentize.managed-agent.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
