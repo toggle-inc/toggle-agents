@@ -1,5 +1,11 @@
 # 依頼者本人の接続で動く経費アシスタント
 
+標準の本人確認はplatformの既存ログインを活用し、agent側のOkta再ログインは必須にしない。
+`authorization_host.create_platform_host` と同梱の共通署名検証器を使用する。
+契約・本人link・BFF/flow所有者照合の必須条件・未接続箇所は
+[_foundation/PLATFORM_IDENTITY.md](_foundation/PLATFORM_IDENTITY.md) を参照する。
+本文中の直接SSO adapterは任意経路の記録で、現在の必須要件ではない。
+
 ## 到達点と未接続箇所
 
 Git正本に `runtime/requester.py` の依頼者別ディスパッチとアクセス契約を追加した。
@@ -107,7 +113,7 @@ Harnessの `_sa_oauth_connection_blockers` には未認可・不足スコープ�
 
 ### Okta OIDC login adapter
 
-会社SSOはOkta OIDCを使う。`runtime/okta_oidc.py` にAuthorization Code flow
+直接SSOを使う任意経路ではOkta OIDCを使える。`runtime/okta_oidc.py` にAuthorization Code flow
 （confidential web client）とPKCE S256のadapterを実装し、`create_app(..., login_adapter=okta)` で接続する。
 Okta issuer、client ID、client secret、許可済みcallback URIは配置設定から固定し、任意のissuerやcallbackを
 リクエスト値から組み立てない。private storeの暗号鍵には専用のSecret Manager secretを使う。

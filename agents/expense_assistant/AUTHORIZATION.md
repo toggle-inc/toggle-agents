@@ -1,5 +1,17 @@
 # エージェント自身が持つ認証・同意・リソーストークン
 
+## 標準方針の更新：platformでログイン済みの本人を使う
+
+標準は `authorization_host.create_platform_host`。SA等が確認済みの本人情報を署名して渡し、
+同梱の共通基盤が署名・依頼・期限・明示person link・replayを検証する。
+本人確認のためのagent別Oktaアプリ登録や、Oktaへの再ログインを標準の必須条件にしない。
+MF等へのサービス同意とagentへの操作許可は別であり、既存のOAuth/会社別同意を維持する。
+詳細なJWT・BFF・JSON同意view・OAuth flow所有者照合は
+[_foundation/PLATFORM_IDENTITY.md](_foundation/PLATFORM_IDENTITY.md) を参照。
+実platform BFF/署名鍵/trust/linkの接続はまだ未完了で、本番提供済みではない。
+
+以下のOkta直接login adapterは任意の別経路として保存する。専用アプリの登録・秘密発行はしていない。
+
 ## 配置先から分離するもの
 
 Git正本はこのエージェントフォルダ。Engineへ固有の認証ロジックを追加しない。
@@ -86,7 +98,7 @@ DB/schema/roleの作成と権限設定はDB管理者が行う。既存Neonの接
 更新用トークンの交換も同じトランザクションで行う。
 使用済み更新トークンのハッシュは再利用検出に必要なので、有効な系列の履歴を安易に削除しない。
 
-## 信頼済み配置コードから組み立てる
+## 任意の直接Okta方式を信頼済み配置コードから組み立てる
 
 `authorization_host.py` の `create_host(settings, resolve_person=..., resolve_connection=...)` は、
 下記の組み立てを一つの入口にする。公開メタデータは固定の配置設定、秘密は専用の

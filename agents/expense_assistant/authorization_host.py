@@ -46,6 +46,16 @@ class AuthorizationHostSettings:
     state_encryption_key: str = field(repr=False)
 
 
+@dataclass(frozen=True)
+class PlatformAuthorizationHostSettings:
+    origin: str
+    tenant_id: str
+    platform_issuer: str
+    platform_public_keys: dict[str, str] = field(repr=False)
+    clients: tuple[PublicClient, ...]
+    database_url: str = field(repr=False)
+
+
 def settings_from_environment(*, origin, tenant_id, okta_issuer, okta_client_id, clients):
     """Read dedicated secrets only; public metadata comes from trusted config."""
     names = (
@@ -82,6 +92,33 @@ def create_host(settings, *, resolve_person, resolve_connection, store_factory=N
         raise ValueError("Explicit identity and per-person connection resolvers required")
     if not isinstance(settings.clients, tuple) or not settings.clients:
         raise ValueError("Explicit OAuth clients required")
+    store = _configured_store(settings, store_factory)
+    okta = OktaOIDCLogin(
+        store,
+        resolve_person,
+        issuer=settings.okta_issuer,
+        client_id=settings.okta_client_id,
+        client_secret=settings.okta_client_secret,
+        callback_uri=settings.origin.rstrip("/") + "/login/callback",
+        tenant_id=settings.tenant_id,
+        state_encryption_key=settings.state_encryption_key,
+    )
+    authority = AgentAuthorization(
+        store,
+        okta.verify_login,
+        issuer=settings.origin,
+        tenant_id=settings.tenant_id,
+        clients=settings.clients,
+    )
+    return create_app(
+        authority,
+        resolve_connection,
+        login_adapter=okta,
+        draft_consent=DraftConsentBinding(authority, resolve_connection),
+    )
+
+
+def _configured_store(settings, store_factory):
     # libpq can otherwise pick a broad local default, service or password file.
     # Reject a missing/weak TLS policy before opening any remote connection.
     from psycopg.conninfo import conninfo_to_dict
@@ -105,27 +142,47 @@ def create_host(settings, *, resolve_person, resolve_connection, store_factory=N
         tenant_id=settings.tenant_id,
         clients=settings.clients,
     )
-    store = (store_factory or PostgresAuthorizationStore)(settings.database_url)
-    okta = OktaOIDCLogin(
+    return (store_factory or PostgresAuthorizationStore)(settings.database_url)
+
+
+def create_platform_host(settings, *, resolve_person, resolve_connection, store_factory=None):
+    """Preferred route: platform authenticates humans, agent verifies each proof.
+
+    No Okta client/secret/callback/session is needed. The deployment must provide
+    a trusted platform BFF and pinned verification keys; this constructor alone
+    does not deploy that platform endpoint or register a trust relationship.
+    """
+    from _foundation.platform_identity import PlatformIdentityVerifier
+    from runtime.platform_login import PlatformLogin
+
+    if not isinstance(settings, PlatformAuthorizationHostSettings):
+        raise ValueError("Explicit platform authorization host settings required")
+    if not callable(resolve_person) or not callable(resolve_connection):
+        raise ValueError("Explicit identity and per-person connection resolvers required")
+    if not isinstance(settings.clients, tuple) or not settings.clients:
+        raise ValueError("Explicit OAuth clients required")
+    store = _configured_store(settings, store_factory)
+    verifier = PlatformIdentityVerifier(
         store,
         resolve_person,
-        issuer=settings.okta_issuer,
-        client_id=settings.okta_client_id,
-        client_secret=settings.okta_client_secret,
-        callback_uri=settings.origin.rstrip("/") + "/login/callback",
+        issuer=settings.platform_issuer,
+        audience=settings.origin,
         tenant_id=settings.tenant_id,
-        state_encryption_key=settings.state_encryption_key,
+        public_keys=settings.platform_public_keys,
     )
+    login = PlatformLogin(verifier)
     authority = AgentAuthorization(
         store,
-        okta.verify_login,
+        login.verify_login,
         issuer=settings.origin,
         tenant_id=settings.tenant_id,
         clients=settings.clients,
     )
-    return create_app(
-        authority,
-        resolve_connection,
-        login_adapter=okta,
-        draft_consent=DraftConsentBinding(authority, resolve_connection),
+    return login.wrap(
+        create_app(
+            authority,
+            resolve_connection,
+            draft_consent=DraftConsentBinding(authority, resolve_connection),
+            platform_login=login,
+        )
     )

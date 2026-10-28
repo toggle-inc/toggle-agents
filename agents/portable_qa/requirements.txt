@@ -1,2 +1,4 @@
 # Only needed for the optional MCP entrance; offline builds use the standard library.
 mcp==2.3.0
+# Optional signed platform identity verification (imported only when configured).
+PyJWT[crypto]==2.15.1

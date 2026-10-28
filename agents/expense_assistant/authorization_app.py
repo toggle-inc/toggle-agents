@@ -89,7 +89,15 @@ class _PrivateHTTPS:
         return await self.app(scope, receive, private_send)
 
 
-def create_app(authority, resolve, *, start_login=None, login_adapter=None, draft_consent=None):
+def create_app(
+    authority,
+    resolve,
+    *,
+    start_login=None,
+    login_adapter=None,
+    draft_consent=None,
+    platform_login=None,
+):
     """Host supplies SSO verification + private storage/providers, not auth logic.
 
     The configured verify_login(Request) adapter must verify its own secure SSO
@@ -110,6 +118,19 @@ def create_app(authority, resolve, *, start_login=None, login_adapter=None, draf
         ):
             raise ValueError("Draft consent must use this same agent-owned authority")
     origin = authority.issuer
+    if platform_login is not None:
+        from runtime.platform_login import PlatformLogin
+
+        if (
+            not isinstance(platform_login, PlatformLogin)
+            or login_adapter is not None
+            or start_login is not None
+            or authority.verify_login != platform_login.verify_login
+            or platform_login.verifier.store is not authority.store
+            or platform_login.verifier.tenant_id != authority.tenant_id
+            or platform_login.verifier.audience != origin
+        ):
+            raise ValueError("Platform verifier, authority and store must match")
     if login_adapter is not None:
         if start_login is not None:
             raise ValueError("Configure either login_adapter or start_login, not both")
@@ -174,7 +195,7 @@ def create_app(authority, resolve, *, start_login=None, login_adapter=None, draf
                     f"({html.escape(capability)})</li>"
                     for capability in pending["capabilities"]
                 )
-                draft_fields = ""
+                draft_fields, offices = "", []
                 if "mf:draft" in pending["capabilities"]:
                     if draft_consent is None:
                         raise AuthorizationError("draft_consent_unavailable")
@@ -194,6 +215,23 @@ def create_app(authority, resolve, *, start_login=None, login_adapter=None, draf
                         + "</select></label>"
                         "<p>選択した会社で、未申請明細の作成と領収書OCR送信を都度確認なしで行います。"
                         "確認・修正・申請はMF画面で行ってください。既存明細の変更・削除・提出は許可しません。</p>"
+                    )
+                if platform_login is not None and request.headers.getlist("accept") == [
+                    "application/json"
+                ]:
+                    return JSONResponse(
+                        {
+                            "schema_version": "agent-consent/v1",
+                            "request_id": pending["request_id"],
+                            "csrf_token": pending["csrf_token"],
+                            "client_name": pending["client_name"],
+                            "capabilities": [
+                                {"id": cap, "label": CAPABILITY_LABELS[cap]}
+                                for cap in pending["capabilities"]
+                            ],
+                            "draft_companies": offices,
+                            "expires_at": pending["expires_at"],
+                        }
                     )
                 return HTMLResponse(
                     '<!doctype html><html lang="ja"><meta charset="utf-8">'
@@ -216,7 +254,9 @@ def create_app(authority, resolve, *, start_login=None, login_adapter=None, draf
                 )
             params = await _form(request)
             if path == "/oauth/consent":
-                if request.headers.getlist("origin") != [origin]:
+                if (platform_login is None and request.headers.getlist("origin") != [origin]) or (
+                    platform_login is not None and not platform_login.allows_consent_origin(request)
+                ):
                     raise AuthorizationError("invalid_request")
                 if params.get("decision") not in ("approve", "deny", "revoke"):
                     raise AuthorizationError("invalid_request")
