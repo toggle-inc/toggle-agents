@@ -13,6 +13,7 @@ import httpx
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import test_runtime as expense_fixtures  # noqa: E402
 from requester_mcp import create_app  # noqa: E402
 from runtime.providers import Receipts  # noqa: E402
 from runtime.requester import (  # noqa: E402
@@ -99,6 +100,88 @@ class RequesterMCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result.get("isError"), result)
             self.assertIn(name, json.dumps(result))
             self.assertNotIn("bob" if name == "alice" else "alice", json.dumps(result))
+
+    def draft_service(self):
+        """Synthetic providers behind the real HTTP boundary, never live MF."""
+        grant = self.grants["alice"]
+        service = grant.service
+        service.mf = expense_fixtures.FakeMF()
+        service.mf.owner = service.state.owner
+        service.policy = expense_fixtures.FakePolicy()
+        service.write_enabled = True
+        self.grants["alice"] = dataclasses.replace(grant, capabilities=frozenset({"mf:draft"}))
+        service.state.set_draft_consent(["office-a"], "synthetic-http-consent")
+        return service
+
+    async def tool_result(self, who, operation, arguments):
+        reply = await self.rpc(who, params={"name": operation, "arguments": arguments})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        result = reply.json()["result"]
+        self.assertFalse(result.get("isError"), result)
+        return result.get("structuredContent") or json.loads(result["content"][0]["text"])
+
+    @with_server
+    async def test_draft_only_http_save_returns_mf_link_once_and_never_crosses_person(self):
+        service = self.draft_service()
+        preview = await self.tool_result(
+            "alice",
+            "mf_create_transaction",
+            {
+                "office": "office-a",
+                "recognized_at": "2020-01-15",
+                "value": 321,
+                "remark": "合成HTTPテスト",
+                "memo": "駅A → 駅B（合成検証）",
+                "ex_item_id": "item-a",
+                "ex_item_name": "旅費交通費",
+            },
+        )
+        arguments = {"preview_id": preview["preview_id"]}
+        other = (
+            await self.rpc("bob", params={"name": "mf_save_draft", "arguments": arguments})
+        ).json()["result"]
+        self.assertTrue(other.get("isError"))
+        self.assertEqual(service.mf.writes, [])
+        result = await self.tool_result("alice", "mf_save_draft", arguments)
+        self.assertEqual(result["review_url"], "https://expense.moneyforward.com/transactions")
+        self.assertEqual(result["draft_status"], "saved_unsubmitted")
+        self.assertTrue(result["readback_verified"])
+        self.assertFalse(result["submitted"])
+        self.assertEqual(await self.tool_result("alice", "mf_save_draft", arguments), result)
+        self.assertEqual(len(service.mf.writes), 1)
+        service.state.set_draft_consent([], "synthetic-http-revoked", active=False)
+        refused = (
+            await self.rpc("alice", params={"name": "mf_save_draft", "arguments": arguments})
+        ).json()["result"]
+        self.assertTrue(refused.get("isError"))
+        self.assertEqual(len(service.mf.writes), 1)
+
+    @with_server
+    async def test_draft_only_http_ocr_is_pending_not_completed_and_legacy_write_is_denied(self):
+        service = self.draft_service()
+        reference = service.receipts.save(b"%PDF-1.4\nsynthetic HTTP receipt", "application/pdf")[
+            "path"
+        ]
+        arguments = {"office": "office-a", "receipt_path": reference}
+        denied = (
+            await self.rpc(
+                "alice",
+                params={
+                    "name": "mf_upload_receipt",
+                    "arguments": {**arguments, "confirm": True},
+                },
+            )
+        ).json()["result"]
+        self.assertTrue(denied.get("isError"))
+        self.assertEqual(service.mf.writes, [])
+        preview = await self.tool_result("alice", "mf_upload_receipt", arguments)
+        result = await self.tool_result(
+            "alice", "mf_save_draft", {"preview_id": preview["preview_id"]}
+        )
+        self.assertEqual(result["draft_status"], "ocr_processing")
+        self.assertTrue(result["ocr_pending"])
+        self.assertFalse(result["submitted"])
+        self.assertEqual([row[0] for row in service.mf.writes], ["upload"])
 
     @with_server
     async def test_missing_invalid_duplicate_and_legacy_shared_bearers_are_unauthorized(self):
