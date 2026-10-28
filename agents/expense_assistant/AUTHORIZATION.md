@@ -52,12 +52,13 @@ Engine・SA・Buzzはいずれも利用クライアントまたは実行先の�
 クラウドで複数レプリカを使う際は、共有のトランザクションストアへ差し替える。
 コンテナの一時SQLiteを永続ストアの代わりに使わない。
 
-`runtime/firestore_auth_store.py` にはFirestore Native database adapterがある。Cloud Runでは
-専用database ID（pilotでは `expense-assistant-auth`）を明示し、他用途のdatabaseや`(default)`を選ばない。
-adapterはtransaction内のwriteをcommit直前まで保留し、Firestoreのread-before-write制約を守りながら
-read-your-writesと原子的commitを提供する。競合は失敗として返し、認可フローをやり直す。
-runtime service accountには `roles/datastore.user` をこのFirestore database resourceだけに限定する
-IAM Conditionを付ける。DB作成・runtime IAM設定は配置管理者が行う。
+`runtime/postgres_auth_store.py` にPostgreSQL adapterがある。会社で利用中のNeon/Postgresを使う場合も、
+Nowcast等の既存アプリ用schema・DB role・接続文字列を共用せず、専用schema `expense_assistant_auth` と
+専用runtime roleを用意する。`runtime/postgres_auth_schema.sql` はDB管理者が適用し、実行roleには
+このschemaのUSAGEとauth_records表のSELECT/INSERT/UPDATEだけを付与する。
+adapterは各操作をPostgres transactionで実行し、読み取った行をロックして一回限りコードの同時交換を防ぐ。
+Neon pooled connection string等は配置先のSecret Managerから注入し、Git・ログ・クライアントへ出さない。
+DB/schema/roleの作成と権限設定はDB管理者が行う。既存Neonの接続文字列をそのまま流用しない。
 
 テストではSQLiteとメモリ用アダプタで同じ発行処理を動かし、
 独立したSQLite接続から同じコードを同時交換しても一度だけ成功することを確認する。
@@ -67,12 +68,16 @@ IAM Conditionを付ける。DB作成・runtime IAM設定は配置管理者が行
 ## 信頼済み配置コードから組み立てる
 
 ```python
+import os
+
 from authorization_app import create_app
 from runtime.authorization import AgentAuthorization
-from runtime.firestore_auth_store import FirestoreAuthorizationStore
+from runtime.postgres_auth_store import PostgresAuthorizationStore
 from runtime.okta_oidc import OktaOIDCLogin
 
-private_transactional_store = FirestoreAuthorizationStore(database="expense-assistant-auth")
+private_transactional_store = PostgresAuthorizationStore(
+    os.environ["EXPENSE_AUTH_DATABASE_URL"], schema="expense_assistant_auth"
+)
 okta = OktaOIDCLogin(
     private_transactional_store,
     resolve_explicit_okta_link,
