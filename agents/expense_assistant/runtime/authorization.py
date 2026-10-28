@@ -177,6 +177,7 @@ class AgentAuthorization:
             "csrf_token": nonce,
             "client_name": client.display_name,
             "capabilities": sorted(capabilities),
+            "expires_at": record["expires_at"],
         }
 
     def decide(self, context, request_id, csrf_token, *, approve, revoke=False):

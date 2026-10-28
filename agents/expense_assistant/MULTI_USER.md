@@ -1,5 +1,11 @@
 # 依頼者本人の接続で動く経費アシスタント
 
+標準の本人確認はplatformの既存ログインを活用し、agent側のOkta再ログインは必須にしない。
+`authorization_host.create_platform_host` と同梱の共通署名検証器を使用する。
+契約・本人link・BFF/flow所有者照合の必須条件・未接続箇所は
+[_foundation/PLATFORM_IDENTITY.md](_foundation/PLATFORM_IDENTITY.md) を参照する。
+本文中の直接SSO adapterは任意経路の記録で、現在の必須要件ではない。
+
 ## 到達点と未接続箇所
 
 Git正本に `runtime/requester.py` の依頼者別ディスパッチとアクセス契約を追加した。
@@ -81,9 +87,138 @@ Harnessの `_sa_oauth_connection_blockers` には未認可・不足スコープ�
 ただし、これだけでMFの個人認証や本ディスパッチへの本人情報の受け渡しが完成するわけではない。
 既存の共有資格情報／一時資格情報の経路を本人認可と混同しない。
 
+### SAからの本人別接続契約
+
+1. SAで認証された社員が「連携して実行」を選ぶ。SAは対象tenant・SA employee・connectionに束縛した
+   一度限りの接続ticketをEngineへ渡し、Engineの `/sa-oauth/connect/{connection_id}` が使用する。
+2. Engineはその社員専用のOAuth認可フローを開始し、agentのProtected Resource Metadataから認可サーバーを
+   発見する。認可リクエストには登録済み `client_id`、Engine callbackの固定 `redirect_uri`、
+   `state`、PKCE S256、`resource`、要求能力を含める。
+3. 未ログインならagent配置の `start_login` アダプタが会社SSOへ送り、署名付きstateを検証して
+   同じ認可URLへ戻す。`verify_login` が検証済みのtenantとcanonical personを返した後、本人に
+   操作能力を表示してagent利用への同意を求める。本人の許可後、agentは一度限りのコードと元のstateを
+   Engine callbackへ返す。SSOログインとagent利用許可は別々の操作。
+4. Engineはcallbackのstate・redirect URI・PKCEを検証し、発行されたagent resource tokenを
+   `tenant + SA employee + connection` の per-user tokenとして保存する。共有tokenや他社員の行を
+   フォールバックに使わない。SA employee IDはEngineの内部主体であり、現在のagent OAuth仕様では
+   agentへ転送されない。
+5. よって、agentのSSO personとSA employeeの同一人物性を、会社の信頼できる本人対応表または
+   署名済み本人連携で確認できるまで、接続を利用可能にしてはならない。メールアドレス一致、
+   SAのtenant-wide credential、モデルの申告で紐付けない。紐付け不能なら認可・本人別service解決を
+   拒否して管理者に対応を依頼する。
+6. 以後Engineは、呼出元SA社員のper-user tokenを短命access/refresh tokenとして維持し、agent MCPへ
+   Bearerで送る。agentはtokenに束縛されたpersonを検証し、その人のサービス同意・MF credentialを
+   毎回解決する。MF OAuth refreshはEngineのagent-token refreshとは別の系列であり、agent側の
+   本人専用secret storeで行う。どちらかが失効・解除されたら該当リクエストを止めて再接続を促す。
+
+### Okta OIDC login adapter
+
+直接SSOを使う任意経路ではOkta OIDCを使える。`runtime/okta_oidc.py` にAuthorization Code flow
+（confidential web client）とPKCE S256のadapterを実装し、`create_app(..., login_adapter=okta)` で接続する。
+Okta issuer、client ID、client secret、許可済みcallback URIは配置設定から固定し、任意のissuerやcallbackを
+リクエスト値から組み立てない。private storeの暗号鍵には専用のSecret Manager secretを使う。
+
+- 開始時に暗号学的乱数の `state`、`nonce`、PKCE verifierを作り、短時間・一回限りのprivate storeに保存する。
+  元の `/oauth/authorize` URLもこのstateレコードに結び付け、queryやcookieの未署名`return_to`は使わない。
+- callbackではstateを原子的に一回だけ消費し、authorization codeを固定redirect URIとverifierで交換する。
+  ID tokenの署名をdiscovery documentのJWKSで検証し、`iss`、`aud`、`exp`、`iat`、`nonce`を検証する。
+- Oktaの安定した`sub`とissuerを外部主体キーにし、tenant内の明示済みidentity linkからcanonical personを解決する。
+  `email`、表示名、部署、SA employee IDを使った自動紐付け・自己登録は禁止する。未リンクは拒否する。
+- ログイン後はランダムなserver-side session IDのみを`Secure; HttpOnly; SameSite=Lax` cookieで渡す。
+  sessionは期限・tenant・canonical personに束縛し、logout/期限切れで失効させる。tokenやID tokenをcookieに入れない。
+- client secret、session state encryption key、Okta tokenはSecret Manager等のprivate secret storeで管理し、
+  public MCP runtimeへOkta client secretを渡さない。IdP callbackでは任意の同意POSTを再送せず、
+  認証後に元の認可GETを再開して同意画面を表示する。
+
+adapterと合成テストは実装済み。Cloud Runには別サービス用のOkta secret参照とcallback設定が見つかったが、
+今回のhost/redirect URIと一致するとは確認していない。Okta app登録変更、pilot用identity link、
+専用store/secret/IAM、expense assistant用hostの接続後、ログイン・logout・未リンク拒否を実機確認する。
+
+### 実ホストのscope→owner binding
+
+PR #4の `SAApprovalAdapter` / `SAAttachmentAdapter` は、毎回のhost callback
+`verify_scope(scope, owner)` が `True` を返すことを要求する。認証ブランチの
+`runtime/sa_identity.py` にある `verify_sa_scope(...)` は、このcallbackに渡せる検査部品である。
+これはSA署名やログインcookieを検証しない。ホストの `verify_invocation(scope, origin)` が、
+固定HTTPSのSA originで最新かつ有効な実行scopeを確認し、scope全体を保持した
+`VerifiedSAInvocation` を返した場合だけ利用する。
+
+この検査はscopeの全フィールド（tenant、requester employee、run、harness session、
+managed agentとversion、invocation、source/root message、channel）をSAで確認した値と照合する。
+ホストは別途、`(tenantId, requesterEmployeeId)` の明示的な本人リンクを解決し、そのcanonical
+person IDを `AgentAuthorization.verify_login` と `RequesterDispatcher` の両方で使う。
+`verify_sa_scope` はその人の `Requester.owner` を計算し、本人用serviceのownerと一致しなければ拒否する。
+リンクは会社SSO subjectまたは同等の認証済みaccount-link手順で作り、email一致から自動生成しない。
+ID・scope・権限の検証は各approval/attachment操作前に新しく行い、結果をcacheしない。
+
+```python
+from runtime.sa_identity import verify_sa_scope
+
+def scope_belongs_to_service(scope, owner):
+    return verify_sa_scope(
+        scope,
+        owner,
+        verify_invocation=sa_gateway.verify_current_invocation,
+        resolve_person=identity_links.resolve_sa_employee,
+        origin=SA_ORIGIN,
+    )
+```
+
+`sa_gateway` は配置先の認証済みクライアントであり、実装時に署名・issuer・audience・期限・
+tenant・employee・run・session・version・origin/source・現在の権限を検証してから
+`VerifiedSAInvocation` を返す。`identity_links` は会社が管理する明示リンクを読む。
+未リンク・不明issuer・期限切れ・run変更・権限取り消し・外部API失敗はすべて拒否する。
+`scope` の元値はSAの認証済みrequest contextから渡し、本文・添付OCR・model tool argsから作らない。
+
+SA service credentialはこのtrusted hostからSAのapproval/attachment APIへ出す認証専用である。
+agentのMCP OAuth client、本人別MF token、EngineがMCPへ送るper-user Bearerとは別に保管する。
+個人用MCP endpointへSA credentialを渡さず、レスポンス・tool引数・ログにも出さない。
+ホストは短命Bearerを本人ごとに解決するMCP adapterと、内部でSA APIを呼ぶapproval/attachment
+adapterを分離し、現在ユーザーのprocess-global cacheを使わない。
+
+### 月末pilotの最小配置条件
+
+- 外部から到達できる固定HTTPS issuerで `authorization_app` と `/mcp` を稼働し、Engineの登録済み
+  OAuth client/callbackと一致させる。ローカルPCや一時Preview tunnelを接続先にしない。
+- `AgentAuthorization` のcode/consent/family/Okta session recordsは、会社で利用中のNeon/Postgresに
+  専用schema `expense_assistant_auth` と専用runtime roleを設けて保存する。実装済みの
+  `PostgresAuthorizationStore`を使い、roleには専用schemaのUSAGEとauth_records表のSELECT/INSERT/UPDATEだけを付与する。
+  Nowcast等の既存アプリ用schema・DB role・接続文字列やコンテナ一時filesystemを流用しない。
+- 会社SSOの `start_login` / `verify_login` と、SA employee→canonical personの明示link tableを接続する。
+  canonical personはSA loginとagent MCP resource tokenの両方で同じIDを使い、既存のSA Employee IDを
+  別名として扱うには認証済みlinkを先に作る。linkが作れない社員はpilot対象外として拒否する。
+- MF Cloud Expense OAuth appの既存client ID/secretを使えるか確認する。使えるappがなければ
+  会社管理下でOAuth appを登録してsecretを発行し、Secret ManagerからMF credentialを取り出す。
+  各社員は自分のMFIDで同じappを個別認可し、MF refresh/access tokensはcanonical person ownerで
+  暗号化保存する。個人用MF tokenを共有・複製しない。
+- SA側credentialは対象pilot tenant/managed agentだけに制限し、次の操作だけに使う。
+  invocation/run/employee/session/version/sourceの確認、当該invocationの添付metadata/binary GET、
+  approval proposalのPOST、本人決定記録のGET。POSTは本人の決定ではなく、確認依頼を作るだけ。
+  既存の別scope/service credentialがこの最小範囲を表現できない場合は、権限を広げずPreview用の
+  別credentialを用意する。外部OCR、MF書込、ユーザー一覧、admin endpointsの権限は付けない。
+- SA credentialを読むIAM bindingは、専用のprivate bridge runtime service accountだけに付ける。
+  public MCP/OAuth processのservice accountには付けない。認証bridgeはprivate network/service identityで
+  呼び、SA secret・MF secret・user refresh tokensをHTTP、MCP body、trace/logへ出さない。
+- 失効hookはEngineのper-user token revokeとagent consent revokeを同期する。MF同意取消・token refresh
+  失敗・canonical link停止も毎回のresolverで拒否し、再認証/再リンクを促す。
+
+ユーザーはpilot tenant 10 / managed agent 1000312 / version 4、Oktaの利用、最小SA API操作、
+必要な専用host/store/secret/IAM設定を承認済み。承認済みの範囲で実装・配置準備を進める。
+本番接続を有効化するには、会社が管理するSA employee→Okta subject→canonical personの明示link、
+Okta appの今回のcallback URI登録、必要なcredentialのSecret Manager登録、Neon/Postgres上の専用schemaと
+runtime roleの作成が必要。既存の `ai-corp-mcp` 用Okta app/hostは別用途のため、そのまま転用しない。
+
+Money Forwardのクラウド経費APIは、利用者がMFIDでログインしてアプリを認可したユーザー権限で
+tokenを発行する。MF側にはクラウド経費ごとのOAuthアプリ登録とclient secretが必要であり、
+refreshでは新しいaccess/refresh tokenが返る。MF client secretは配置側の秘密として保持し、社員へ
+入力させない。MF公式の[OAuth/API手順](https://github.com/moneyforward/expense-api-doc) と
+[認可エンドポイント](https://developers.biz.moneyforward.com/docs/api/auth/authorize/)、
+[トークンエンドポイント](https://developers.biz.moneyforward.com/docs/api/auth/create-token/)を参照。
+この確認は仕様資料の照合であり、MFアプリ登録・権限・実ユーザーのOAuth往復成功を意味しない。
+
 ## 次の統合段階
 
-1. エージェント所有の認証サービスへ、実会社SSOの検証アダプタと秘密保管先を設定する。
+1. エージェント所有の認証サービスへ、Okta adapter、private store/secret、明示identity-link resolverを設定する。
    Engineには既存の外部MCP OAuth経路があり、Harnessはユーザー別に解決したBearerをMCPへ渡す。
    Engine内部の本人IDが自動的に外部MCPへ渡るわけではない。
    経費固有の認証・同意・トークン発行をEngineへ移さない。Engineは利用先の一つとして設定する。

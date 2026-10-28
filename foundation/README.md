@@ -2,6 +2,9 @@
 
 会話履歴を読む契約・処理・合成テストの正本です。特定のエージェント、Engine、
 SA、BuzzのDBや認証方式には依存しません。永続的な会話メモリや横断検索ではありません。
+ログイン済みplatformの署名済み本人情報を検証する `platform_identity.py` も共通基盤に含めます。
+Okta再ログインを必須にしない本人確認・個人ID対応・replay防止の契約と未接続部分は
+[PLATFORM_IDENTITY.md](PLATFORM_IDENTITY.md) を参照してください。
 
 ## 配置単位を維持する
 

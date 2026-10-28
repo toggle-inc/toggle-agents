@@ -2,6 +2,7 @@
 
 import contextlib
 import html
+import inspect
 from urllib.parse import parse_qs, urlsplit
 
 from requester_mcp import create_app as create_mcp
@@ -88,16 +89,58 @@ class _PrivateHTTPS:
         return await self.app(scope, receive, private_send)
 
 
-def create_app(authority, resolve):
+def create_app(
+    authority,
+    resolve,
+    *,
+    start_login=None,
+    login_adapter=None,
+    draft_consent=None,
+    platform_login=None,
+):
     """Host supplies SSO verification + private storage/providers, not auth logic.
 
     The configured verify_login(Request) adapter must verify its own secure SSO
     session, including subject, tenant and expiry. Unconfigured login fails closed.
+    Optional start_login(Request) initiates the host's SSO flow for an
+    unauthenticated browser authorization request and must return to the exact
+    original /oauth/authorize URL after validating a signed, single-use state.
     No cookie/query/body claiming a person is accepted by this program itself.
     """
     if not isinstance(authority, AgentAuthorization):
         raise ValueError("Agent-owned authority is required")
+    if draft_consent is not None:
+        from runtime.draft_consent import DraftConsentBinding
+
+        if (
+            not isinstance(draft_consent, DraftConsentBinding)
+            or draft_consent.authority is not authority
+        ):
+            raise ValueError("Draft consent must use this same agent-owned authority")
     origin = authority.issuer
+    if platform_login is not None:
+        from runtime.platform_login import PlatformLogin
+
+        if (
+            not isinstance(platform_login, PlatformLogin)
+            or login_adapter is not None
+            or start_login is not None
+            or authority.verify_login != platform_login.verify_login
+            or platform_login.verifier.store is not authority.store
+            or platform_login.verifier.tenant_id != authority.tenant_id
+            or platform_login.verifier.audience != origin
+        ):
+            raise ValueError("Platform verifier, authority and store must match")
+    if login_adapter is not None:
+        if start_login is not None:
+            raise ValueError("Configure either login_adapter or start_login, not both")
+        if (
+            login_adapter.tenant_id != authority.tenant_id
+            or login_adapter.callback_uri != origin + "/login/callback"
+            or authority.verify_login != login_adapter.verify_login
+        ):
+            raise ValueError("Okta adapter tenant, session verifier, and fixed callback must match")
+        start_login = login_adapter.start_login
     dispatcher = RequesterDispatcher(authority.authenticate, resolve, clock=authority.clock)
     mcp = create_mcp(dispatcher, urlsplit(origin).hostname)
 
@@ -152,6 +195,44 @@ def create_app(authority, resolve):
                     f"({html.escape(capability)})</li>"
                     for capability in pending["capabilities"]
                 )
+                draft_fields, offices = "", []
+                if "mf:draft" in pending["capabilities"]:
+                    if draft_consent is None:
+                        raise AuthorizationError("draft_consent_unavailable")
+                    offices = draft_consent.choices(request, pending["request_id"])
+                    options = "".join(
+                        '<option value="'
+                        + html.escape(office["id"], quote=True)
+                        + '">'
+                        + html.escape(office["name"])
+                        + "</option>"
+                        for office in offices
+                    )
+                    draft_fields = (
+                        '<label>未申請明細の作成を許可する会社<select name="draft_office" required>'
+                        '<option value="">会社を選択してください</option>'
+                        + options
+                        + "</select></label>"
+                        "<p>選択した会社で、未申請明細の作成と領収書OCR送信を都度確認なしで行います。"
+                        "確認・修正・申請はMF画面で行ってください。既存明細の変更・削除・提出は許可しません。</p>"
+                    )
+                if platform_login is not None and request.headers.getlist("accept") == [
+                    "application/json"
+                ]:
+                    return JSONResponse(
+                        {
+                            "schema_version": "agent-consent/v1",
+                            "request_id": pending["request_id"],
+                            "csrf_token": pending["csrf_token"],
+                            "client_name": pending["client_name"],
+                            "capabilities": [
+                                {"id": cap, "label": CAPABILITY_LABELS[cap]}
+                                for cap in pending["capabilities"]
+                            ],
+                            "draft_companies": offices,
+                            "expires_at": pending["expires_at"],
+                        }
+                    )
                 return HTMLResponse(
                     '<!doctype html><html lang="ja"><meta charset="utf-8">'
                     "<title>経費アシスタントの利用許可</title>"
@@ -159,23 +240,38 @@ def create_app(authority, resolve):
                     + html.escape(pending["client_name"])
                     + "から、本人の接続を使って次の操作を呼べるようにします。</p><ul>"
                     + scopes
-                    + "</ul><p>MF・カレンダーへの連携同意、"
-                    "および経費の個別登録承認は別に必要です。</p>"
+                    + "</ul><p>MF・カレンダーへの連携同意は別に必要です。"
+                    "既存明細の変更・削除には別の本人承認が必要です。</p>"
                     "<p>この利用許可は解除するまで継続し、接続用トークンを自動更新できます。"
                     "不正な使い回しの検出時には停止します。</p>"
                     '<form method="post" action="/oauth/consent">'
                     + fields
+                    + draft_fields
                     + '<button name="decision" value="approve">許可する</button>'
-                    '<button name="decision" value="deny">許可しない</button>'
-                    '<button name="decision" value="revoke">'
+                    '<button name="decision" value="deny" formnovalidate>許可しない</button>'
+                    '<button name="decision" value="revoke" formnovalidate>'
                     "既存の利用許可も解除する</button></form></html>"
                 )
             params = await _form(request)
             if path == "/oauth/consent":
-                if request.headers.getlist("origin") != [origin]:
+                if (platform_login is None and request.headers.getlist("origin") != [origin]) or (
+                    platform_login is not None and not platform_login.allows_consent_origin(request)
+                ):
                     raise AuthorizationError("invalid_request")
                 if params.get("decision") not in ("approve", "deny", "revoke"):
                     raise AuthorizationError("invalid_request")
+                draft_decision = None
+                if draft_consent is not None and params["decision"] in {"approve", "revoke"}:
+                    with authority.store.transaction() as records:
+                        pending = records.get(authority._key("request", params["request_id"]))
+                    if pending and "mf:draft" in pending["capabilities"]:
+                        draft_decision = draft_consent.prepare(
+                            request,
+                            params["request_id"],
+                            params["csrf_token"],
+                            params.get("draft_office"),
+                            revoke=params["decision"] == "revoke",
+                        )
                 target = authority.decide(
                     request,
                     params["request_id"],
@@ -183,6 +279,8 @@ def create_app(authority, resolve):
                     approve=params["decision"] == "approve",
                     revoke=params["decision"] == "revoke",
                 )
+                if draft_decision is not None:
+                    draft_consent.apply(request, draft_decision)
                 return RedirectResponse(target, status_code=303)
             if path == "/oauth/token":
                 if params.get("grant_type") == "refresh_token":
@@ -212,6 +310,20 @@ def create_app(authority, resolve):
                 return Response(status_code=200)
             raise AuthorizationError("invalid_request")
         except AuthorizationError as error:
+            if (
+                error.code == "login_required"
+                and path == "/oauth/authorize"
+                and start_login is not None
+            ):
+                try:
+                    response = start_login(request)
+                    if inspect.isawaitable(response):
+                        response = await response
+                    if isinstance(response, Response):
+                        return response
+                except Exception:
+                    # Do not expose identity-provider or session details.
+                    pass
             return JSONResponse(
                 {"error": error.code}, status_code=401 if error.code == "login_required" else 400
             )
@@ -234,5 +346,12 @@ def create_app(authority, resolve):
             ("/oauth/revoke", ["POST"]),
         )
     ]
+    if login_adapter is not None:
+        routes.extend(
+            (
+                Route("/login/callback", login_adapter.callback, methods=["GET"]),
+                Route("/logout", login_adapter.logout, methods=["POST"]),
+            )
+        )
     routes.append(Mount("/", app=mcp))
     return _PrivateHTTPS(Starlette(routes=routes, lifespan=lifespan), origin)

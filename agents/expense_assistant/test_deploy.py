@@ -72,6 +72,7 @@ class DeploymentTests(unittest.TestCase):
                     "import sys; sys.path.insert(0, sys.argv[1]); "
                     "from _foundation.conversation import ConversationReader; "
                     "from _foundation.history_sources import SuccessAssistHistory, BuzzHistory; "
+                    "from authorization_host import create_host; "
                     "from mcp_server import create_server",
                     str(output),
                 ],
@@ -92,6 +93,7 @@ class DeploymentTests(unittest.TestCase):
                     "engine_mcp.py",
                     "requester_mcp.py",
                     "authorization_app.py",
+                    "authorization_host.py",
                     "connect.py",
                     "requirements.txt",
                     "expense_preview.py",
