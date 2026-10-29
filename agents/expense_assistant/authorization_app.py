@@ -164,7 +164,16 @@ def create_app(
                 if service_connections is None:
                     return JSONResponse({"error": "service_connections_unavailable"}, status_code=503)
                 if path == "/connections/callback":
-                    params = _parameters(request.url.query)
+                    if request.method == "POST":
+                        if request.url.query or (
+                            platform_login is None and request.headers.getlist("origin") != [origin]
+                        ) or (
+                            platform_login is not None and not platform_login.allows_consent_origin(request)
+                        ):
+                            raise AuthorizationError("invalid_request")
+                        params = await _form(request)
+                    else:
+                        params = _parameters(request.url.query)
                     provider = params.pop("provider", None)
                     try:
                         result = service_connections.complete(person, provider, params)
@@ -394,7 +403,7 @@ def create_app(
             ("/oauth/revoke", ["POST"]),
             ("/connections", ["GET"]),
             ("/connections/start", ["POST"]),
-            ("/connections/callback", ["GET"]),
+            ("/connections/callback", ["GET", "POST"]),
         )
     ]
     if login_adapter is not None:

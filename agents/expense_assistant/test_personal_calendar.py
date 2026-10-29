@@ -20,7 +20,7 @@ from runtime.requester import Requester
 from runtime.state import ExpenseError
 
 
-def _file_refresh_worker(root, now, started, results):
+def _file_refresh_worker(root, now, started, committed, results):
     def handler(request):
         results.put("refresh")
         return httpx.Response(200, json={"access_token": "process-access",
@@ -31,7 +31,12 @@ def _file_refresh_worker(root, now, started, results):
             clock=lambda: now, http_client=client)
         person = Requester("tenant-a", "alice", now + 10000)
         started.wait(timeout=10)
-        results.put(adapter.status(person))
+        initial = adapter.status(person)
+        if initial == "connected":
+            committed.set()
+        if not committed.wait(timeout=10):
+            raise AssertionError("Refresh did not commit")
+        results.put({"initial": initial, "final": adapter.status(person)})
 
 
 class MemoryVault:
@@ -455,9 +460,9 @@ class PersonalCalendarTests(unittest.TestCase):
             self.connect()
             self.now += 3541
             context = multiprocessing.get_context("spawn")
-            started, results = context.Event(), context.Queue()
+            started, committed, results = context.Event(), context.Event(), context.Queue()
             processes = [context.Process(target=_file_refresh_worker,
-                args=(root, self.now, started, results)) for _ in range(2)]
+                args=(root, self.now, started, committed, results)) for _ in range(2)]
             try:
                 for process in processes:
                     process.start()
@@ -466,7 +471,17 @@ class PersonalCalendarTests(unittest.TestCase):
                     process.join(timeout=15)
                     self.assertEqual(process.exitcode, 0)
                 observed = [results.get(timeout=3) for _ in range(3)]
-                self.assertCountEqual(observed, ["refresh", "connected", "connected"])
+                # The committed refresh fence intentionally reports unavailable
+                # to a concurrent caller while the other process exchanges.
+                # Both must observe the same rotated token after its commit,
+                # without replaying the old refresh token or provider exchange.
+                self.assertEqual(observed.count("refresh"), 1)
+                statuses = [row for row in observed if isinstance(row, dict)]
+                self.assertEqual(len(statuses), 2)
+                self.assertTrue(all(row["initial"] in {"connected", "unavailable"} for row in statuses))
+                self.assertEqual([row["final"] for row in statuses], ["connected", "connected"])
+                self.assertEqual(self.adapter.status(self.alice), "connected")
+                self.assertEqual(self.requests[-1].url, TOKEN_URL)  # Initial code exchange only.
             finally:
                 for process in processes:
                     if process.is_alive():

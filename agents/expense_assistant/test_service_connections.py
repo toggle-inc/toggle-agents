@@ -184,6 +184,26 @@ class ServiceConnectionTests(platform_fixture.PlatformLoginTests):
         duplicate = path + "&state=another"
         self.assertEqual((await self.client.get(duplicate, headers=self.signed("GET", duplicate))).status_code, 400)
 
+    async def test_callback_post_keeps_code_out_of_url_and_binds_exact_body_and_origin(self):
+        calls = []
+        self.manager._complete = lambda person, provider, params: calls.append((person.person_id, params))
+        path = "/connections/callback"
+        body = urlencode({"provider": "mf", "code": "synthetic-code", "state": "alice-state"}).encode()
+        def headers(data, **extra):
+            return {**self.signed("POST", path, data), "accept": "application/json",
+                    "content-type": "application/x-www-form-urlencoded", **extra}
+        response = await self.client.post(path, content=body, headers=headers(body))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(str(response.request.url), self.origin + path)
+        self.assertEqual(calls, [("alice", {"code": "synthetic-code", "state": "alice-state"})])
+        self.assertNotIn("synthetic-code", response.text)
+        tampered = body.replace(b"synthetic-code", b"modified-code")
+        self.assertEqual((await self.client.post(path, content=tampered, headers=headers(body))).status_code, 401)
+        self.assertEqual((await self.client.post(path, content=body, headers=headers(body, origin="https://attacker.example"))).status_code, 401)
+        self.assertEqual((await self.client.post(path + "?code=forbidden", content=body,
+                                               headers=headers(body))).status_code, 401)
+        self.assertEqual(len(calls), 1)
+
     async def test_google_callback_metadata_is_not_used_as_identity_or_permission(self):
         self.manager.providers["calendar"] = ConnectionProvider(
             "calendar", "Googleカレンダー", frozenset({"https://accounts.google.com"})

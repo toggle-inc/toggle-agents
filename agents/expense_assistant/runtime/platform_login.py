@@ -61,7 +61,12 @@ class _VerifiedPlatformRequests:
                 or values(b"host") != [urlsplit(origin).netloc]
                 or len(proofs) != 1
                 or len(source_origin) > 1
-                or scope["method"] != ("GET" if scope["path"] in {"/oauth/authorize", "/connections", "/connections/callback"} else "POST")
+                or scope["method"] not in (
+                    {"GET", "POST"} if scope["path"] == "/connections/callback"
+                    else {"GET"} if scope["path"] in {"/oauth/authorize", "/connections"}
+                    else {"POST"}
+                )
+                or (scope["method"] == "POST" and scope.get("query_string", b""))
             ):
                 raise PlatformIdentityError
             chunks, size = [], 0
