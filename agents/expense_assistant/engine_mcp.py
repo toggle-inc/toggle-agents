@@ -14,6 +14,8 @@ from mcp_server import create_server
 from runtime.connection import connect
 from runtime.state import ExpenseError
 
+MAX_KEY_HOURS = 48
+
 
 def read_key(path, owner, *, clock=time.time):
     path = Path(path)
@@ -26,15 +28,15 @@ def read_key(path, owner, *, clock=time.time):
         or not isinstance(data.get("token"), str)
         or len(data["token"]) < 40
         or type(data.get("expires_at")) not in (int, float)
-        or not clock() < data["expires_at"] <= clock() + 86400
+        or not clock() < data["expires_at"] <= clock() + MAX_KEY_HOURS * 3600
     ):
         raise ExpenseError("専用接続キーの本人・テナント・期限を確認してください。")
     return data
 
 
 def issue_key(path, owner, *, hours=24, clock=time.time):
-    if type(hours) is not int or not 1 <= hours <= 24:
-        raise ExpenseError("接続キーの期限は1〜24時間にしてください。")
+    if type(hours) is not int or not 1 <= hours <= MAX_KEY_HOURS:
+        raise ExpenseError("接続キーの期限は1〜48時間にしてください。")
     path = Path(path).expanduser().absolute()
     if path.is_relative_to(Path(__file__).resolve().parent):
         raise ExpenseError("接続キーは公開フォルダの外に保存してください。")
@@ -115,16 +117,20 @@ def main():
     parser.add_argument("--key-file", type=Path, required=True)
     parser.add_argument("--public-host")
     parser.add_argument("--port", type=int, default=8767)
+    parser.add_argument("--hours", type=int, default=24, help="Key lifetime, 1–48 hours")
+    parser.add_argument("--read-only", action="store_true", help="Disable MF financial writes")
     args = parser.parse_args()
     service = None
     try:
         service = connect(args.profile)
         if args.command == "issue-key":
-            issue_key(args.key_file, service.state.owner)
+            issue_key(args.key_file, service.state.owner, hours=args.hours)
             print(
-                "Private tenant-10 key created; expires within 24 hours. Value not printed."
+                f"Private tenant-10 key created; expires within {args.hours} hours. Value not printed."
             )
             return
+        if args.read_only:
+            service.write_enabled = False
         app = create_app(service, args.key_file, args.public_host)
         import uvicorn
 
