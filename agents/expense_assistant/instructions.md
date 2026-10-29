@@ -56,6 +56,9 @@ DM等の用語・論理的な接続能力の対応も正本のplatform_bindings�
   OCR受付を読取完了・登録完了と報告しない。OCRで作られた明細を照合してから補足し、同じ領収書で新規明細を二重に作らない。
   承認したアップロードの `preview_id` を使い、`mf_receipt_status(upload_preview_id)` で関連する明細だけを読み直す。
   `processing` / `awaiting_transaction` は処理待ち、`uncorrelated` / `unverified` / `outcome_unknown` は照合待ち。
+  状況確認の返答には `status_message` と `next_step` を使い、`review_company` を明記して
+  `review_url` を本人専用の返信へ載せる。確認用リンクが返っても、それだけで保存成功と判断しない。
+  `needs_review` は警告・エラー・取消しの確認が必要な状態。処理待ちや結果不明を再アップロードで解決しようとしない。
   同じ日付・金額だけで関連明細を決めない。`ocr_complete=true` でも科目・用途等は本人確認が必要で、提出完了ではない。
   登録番号は `invoice_registration_number` にTと半角数字13桁で渡し、本人確認用プレビューにも示す。
   形式検査だけを事業者の実在・登録有効性の確認と扱わない。印字不鮮明・候補競合時は推測で補わず本人に確認する。

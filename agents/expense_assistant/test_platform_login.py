@@ -207,6 +207,83 @@ class PlatformLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("set-cookie", second.headers)
 
     @with_platform_server
+    async def test_http_refresh_preserves_person_and_replay_revokes_only_that_person(self):
+        # Exercise the HTTP boundary, not only the authority's Python methods.
+        # All identities, credentials and MF responses are synthetic.
+        self.authority.clock = lambda: self.now
+        pairs = {}
+        for person in ("alice", "bob"):
+            consent = await self.consent(person)
+            self.assertEqual(consent.status_code, 303, consent.text)
+            code = parse_qs(urlsplit(consent.headers["location"]).query)["code"][0]
+            response = await self.client.post(
+                "/oauth/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "client_id": "sa",
+                    "redirect_uri": self.platform + "/callback",
+                    "resource": self.origin + "/mcp",
+                    "code_verifier": VERIFIER,
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            pairs[person] = response.json()
+
+        async def offices(pair):
+            return await self.client.post(
+                "/mcp",
+                headers={
+                    "authorization": "Bearer " + pair["access_token"],
+                    "accept": "application/json, text/event-stream",
+                    "mcp-protocol-version": "2025-03-26",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "mf_offices", "arguments": {}},
+                },
+            )
+
+        self.now += 901
+        self.assertEqual((await offices(pairs["alice"])).status_code, 401)
+        self.assertEqual(self.services["alice"].mf.calls, 0)
+        renewed = {}
+        for person, original in pairs.items():
+            # Refresh has no platform assertion, SSO cookie or new consent.
+            response = await self.client.post(
+                "/oauth/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": "sa",
+                    "refresh_token": original["refresh_token"],
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            renewed[person] = response.json()
+            self.assertNotEqual(renewed[person]["refresh_token"], original["refresh_token"])
+            result = await offices(renewed[person])
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertIn(person, result.text)
+            self.assertNotIn("bob" if person == "alice" else "alice", result.text)
+
+        replay = await self.client.post(
+            "/oauth/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": "sa",
+                "refresh_token": pairs["alice"]["refresh_token"],
+            },
+        )
+        self.assertEqual(replay.status_code, 400, replay.text)
+        self.assertEqual(replay.json()["error"], "invalid_grant")
+        self.assertEqual((await offices(renewed["alice"])).status_code, 401)
+        self.assertEqual(self.services["alice"].mf.calls, 1)
+        self.assertEqual((await offices(renewed["bob"])).status_code, 200)
+
+    @with_platform_server
     async def test_platform_identity_proof_does_not_grant_mcp_access(self):
         proof = self.signed("GET", self.authorize_path())["x-agent-platform-assertion"]
         response = await self.client.post(

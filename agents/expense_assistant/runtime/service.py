@@ -750,15 +750,61 @@ class ExpenseService:
             "human_confirmation_required": True,
             "transactions": [],
             "writes_performed": 0,
+            "review_url": "https://expense.moneyforward.com/transactions",
+            "review_link_kind": "transaction_list",
+            "review_company": company["name"],
+            "review_office_id": company["id"],
+            "submitted": False,
         }
-        if details["status"] != "done":
-            return {
-                **base,
-                "status": "not_submitted" if details["status"] == "preview" else "outcome_unknown",
+
+        def status_result(status, **values):
+            messages = {
+                "not_submitted": (
+                    "領収書はまだ送信していません。",
+                    "初回の会社別許可または対象の承認を確認してから送信してください。",
+                ),
+                "outcome_unknown": (
+                    "領収書の送信結果を確認できていません。",
+                    "二重登録を避けるため再送せず、MFの明細一覧で確認してください。",
+                ),
+                "uncorrelated": (
+                    "受付結果とMF明細の対応を確認できていません。",
+                    "別の新規明細を作らず、MFの明細一覧で領収書と対象明細を確認してください。",
+                ),
+                "awaiting_transaction": (
+                    "領収書に対応する全明細の反映を待っています。",
+                    "再送せず、時間をおいて同じ確認IDで状況を確認してください。",
+                ),
+                "processing": (
+                    "MFで領収書を処理中です。完了はまだ確認できていません。",
+                    "再送せず、時間をおいて同じ確認IDで状況を確認してください。",
+                ),
+                "input_complete": (
+                    "MFのOCR入力完了を確認しました。内容の正しさは本人の確認が必要です。",
+                    "MFの明細一覧で内容を確認・修正し、提出は本人が行ってください。",
+                ),
+                "needs_review": (
+                    "MFの処理に警告・エラーまたは取消しがあり、本人の確認が必要です。",
+                    "再送や新規作成はせず、MFの明細一覧で対象明細を確認してください。",
+                ),
+                "unverified": (
+                    "MFの処理状態を確認できず、完了とは判断できません。",
+                    "再送せず、MFの明細一覧で対象明細を確認してください。",
+                ),
             }
+            message, next_step = messages[status]
+            return {
+                **base, **values, "status": status, "status_message": message,
+                "next_step": "MFの会社選択が「" + company["name"] + "」と一致するか確認してください。" + next_step,
+            }
+
+        if details["status"] != "done":
+            return status_result(
+                "not_submitted" if details["status"] == "preview" else "outcome_unknown"
+            )
         response = (details["result"] or {}).get("result")
         if not isinstance(response, dict):
-            return {**base, "status": "uncorrelated"}
+            return status_result("uncorrelated")
 
         def identifiers(key):
             rows = response.get(key, [])
@@ -796,9 +842,9 @@ class ExpenseService:
                 if (row.get("mf_file") or {}).get("id") in file_ids
             ]
         else:
-            return {**base, "status": "uncorrelated"}
+            return status_result("uncorrelated")
         if not rows:
-            return {**base, "status": "awaiting_transaction"}
+            return status_result("awaiting_transaction")
         if len(rows) > 20 or len({row.get("id") for row in rows}) != len(rows):
             raise ExpenseError("OCRの関連明細を一意に照合できません。")
         states = {row.get("automatic_status") for row in rows}
@@ -825,12 +871,11 @@ class ExpenseService:
             status = "processing"
         else:
             status = "unverified"
-        return {
-            **base,
-            "status": status,
-            "ocr_complete": status == "input_complete",
-            "transactions": [compact(row) for row in rows],
-        }
+        return status_result(
+            status,
+            ocr_complete=status == "input_complete",
+            transactions=[compact(row) for row in rows],
+        )
 
     def mf_save_draft(self, preview_id):
         """Save a prepared create/upload under initial person+office consent, no custom UI.

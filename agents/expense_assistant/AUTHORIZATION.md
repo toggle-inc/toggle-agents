@@ -197,7 +197,14 @@ MF・Google自身の同意取消・セキュリティポリシーによる失効
 
 ```sh
 python -m unittest test_authorization test_authorization_app -v
+python -m unittest test_platform_login test_refresh -v
 ```
+
+`test_platform_login` は合成の署名済みプラットフォーム本人情報から同意・コード交換を経て、
+HTTP越しのアクセストークン期限切れ、再ログインなしの更新、本人別MCP応答まで検証する。
+使用済み更新トークンの再送で当人の系列だけが失効し、別の本人の接続が継続することも確認する。
+これはエージェント側HTTP境界の合成検証であり、SAブラウザ・実MF/Google・配置済み版の
+自動更新成功を意味しない。
 
 認可コード・PKCEの設計は [OAuth Security BCP (RFC 9700)](https://www.rfc-editor.org/rfc/rfc9700.html) を参照。
 この実装は適合性認証を受けたものではないため、本番公開前には認証・OAuth境界のレビューと実SSO E2Eを行う。
