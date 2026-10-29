@@ -9,10 +9,31 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from runtime.delivery import load_contract, resolve_binding  # noqa: E402
+from runtime.delivery import load_contract, receipt_text, resolve_binding  # noqa: E402
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_receipt_distinguishes_verified_same_conversation_from_channel(self):
+        self.assertEqual(receipt_text(verified_same_requester_agent_conversation=True),
+                         "依頼を受け付けました。この会話で回答します。")
+        self.assertEqual(receipt_text(), load_contract()["policy"]["origin_notification"]["text"])
+        for untrusted in ("DM", "true", 1, None, {}):
+            with self.assertRaises(ValueError):
+                receipt_text(verified_same_requester_agent_conversation=untrusted)
+
+    def test_legacy_receipt_and_invalid_same_conversation_text(self):
+        policy = load_contract()["policy"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            notice = dict(policy["origin_notification"])
+            notice.pop("same_conversation_text")
+            (root / "delivery.json").write_text(json.dumps({**policy, "origin_notification": notice}))
+            self.assertEqual(receipt_text(verified_same_requester_agent_conversation=True, root=root), notice["text"])
+            for value in (None, "", " ", "@here", "https://example.com", "a" * 501):
+                (root / "delivery.json").write_text(json.dumps({**policy, "origin_notification": {**notice, "same_conversation_text": value}}))
+                with self.assertRaises(ValueError):
+                    load_contract(root)
+
     def test_contract_covers_all_result_paths_and_has_reproducible_identity(self):
         contract = load_contract()
         self.assertEqual(
