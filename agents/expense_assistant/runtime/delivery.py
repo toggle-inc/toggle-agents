@@ -13,6 +13,7 @@ def load_contract(root=None):
         policy.get("schema_version") != "agent-delivery-contract/v1"
         or policy.get("result_audience") != "authenticated_requester_only"
         or policy.get("recipient_source") != "verified_request_actor"
+        or policy.get("conversation_binding") != "verified_requester_and_invoked_agent"
         or policy.get("missing_private_delivery") != "withhold_result_no_origin_fallback"
         or policy.get("origin_notification", {}).get("mode") != "fixed_receipt_only"
         or not isinstance(policy.get("origin_notification", {}).get("text"), str)
@@ -70,6 +71,7 @@ def resolve_binding(platform, *, verified_capabilities, verified_guarantees, roo
         "source_sha256": contract["source_sha256"],
         "binding": binding,
         "recipient_source": policy["recipient_source"],
+        "conversation_binding": policy["conversation_binding"],
         "origin_notification": policy["origin_notification"],
         "result_audience": policy["result_audience"],
     }

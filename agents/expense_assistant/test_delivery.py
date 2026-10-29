@@ -33,6 +33,9 @@ class DeliveryTests(unittest.TestCase):
             )
             self.assertEqual(decision["binding"], binding)
             self.assertEqual(decision["recipient_source"], "verified_request_actor")
+            self.assertEqual(
+                decision["conversation_binding"], "verified_requester_and_invoked_agent"
+            )
             self.assertEqual(decision["result_audience"], "authenticated_requester_only")
             self.assertEqual(decision["origin_notification"]["mode"], "fixed_receipt_only")
 
@@ -55,6 +58,9 @@ class DeliveryTests(unittest.TestCase):
             for change in (
                 {"result_audience": "origin_channel"},
                 {"recipient_source": "model"},
+                {"conversation_binding": "requester_self_dm"},
+                {"conversation_binding": "model_selected_agent"},
+                {"conversation_binding": None},
                 {"missing_private_delivery": "origin_channel"},
                 {"protected_outputs": ["answer"]},
             ):

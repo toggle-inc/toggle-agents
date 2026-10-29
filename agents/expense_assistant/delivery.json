@@ -4,6 +4,7 @@
   "protected_outputs": ["answer", "intermediate_result", "tool_result", "progress", "error", "attachment", "completion_summary"],
   "origin_notification": {"mode": "fixed_receipt_only", "text": "依頼を受け付けました。内容を含む回答は本人専用の会話に送ります。"},
   "recipient_source": "verified_request_actor",
+  "conversation_binding": "verified_requester_and_invoked_agent",
   "missing_private_delivery": "withhold_result_no_origin_fallback",
   "required_guarantees": ["authenticated_actor_binding", "requester_only_visibility", "no_origin_streaming", "idempotent_delivery"],
   "platform_bindings": {
