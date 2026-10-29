@@ -8,6 +8,7 @@ Never pass the legacy owner key or a tenant-wide Engine execution JWT here.
 
 import functools
 import inspect
+from contextlib import ExitStack
 from contextvars import ContextVar
 
 from mcp.server.transport_security import TransportSecuritySettings
@@ -20,8 +21,9 @@ from runtime.state import ExpenseError
 class RequestAuthorization:
     """Pure ASGI middleware, with an isolated context for each HTTP request."""
 
-    def __init__(self, app, dispatcher, context):
+    def __init__(self, app, dispatcher, context, *, history_runtime=None, history_resolver=None):
         self.app, self.dispatcher, self.context = app, dispatcher, context
+        self.history_runtime, self.history_resolver = history_runtime, history_resolver
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -30,6 +32,7 @@ class RequestAuthorization:
             await send({"type": "websocket.close", "code": 1008})
             return
         values = [v for k, v in scope.get("headers", ()) if k.lower() == b"authorization"]
+        history_scope = ExitStack()
         try:
             if len(values) != 1 or not values[0].startswith(b"Bearer "):
                 raise ExpenseError("Missing personal authorization")
@@ -37,8 +40,18 @@ class RequestAuthorization:
             if not 1 <= len(credential) <= 8192 or any(c <= 32 or c >= 127 for c in credential):
                 raise ExpenseError("Invalid personal authorization")
             token = credential.decode("ascii")
-            self.dispatcher.validate_request(token)
+            person = self.dispatcher.validate_request(token)
+            if self.history_runtime is not None:
+                from runtime.history_request import HistoryRequestBinding
+                try:
+                    binding = self.history_resolver(scope, person)
+                    if not isinstance(binding, HistoryRequestBinding) or not binding.matches(person):
+                        raise ExpenseError("Invalid history binding")
+                    history_scope.enter_context(self.history_runtime.bind(binding.invocation))
+                except Exception:
+                    raise ExpenseError("Invalid history binding") from None
         except ExpenseError:
+            history_scope.close()
             await send(
                 {
                     "type": "http.response.start",
@@ -71,6 +84,7 @@ class RequestAuthorization:
             return await self.app(scope, receive, private_send)
         finally:
             self.context.reset(handle)
+            history_scope.close()
 
 
 class _RequestService:
@@ -103,15 +117,23 @@ class _RequestService:
         return invoke
 
 
-def create_app(dispatcher, public_host):
+def create_app(dispatcher, public_host, *, history_runtime=None, history_resolver=None):
     """Configure the existing Engine external-OAuth MCP endpoint as this /mcp.
 
     The external OAuth issuer/consent UI is a separate prerequisite, not created
     by this function. All tools AND receipt resources use the same boundary.
     No disk credentials, live connections, or token issuers are supplied here.
+    History is opt-in, with an agent-owned runtime and trusted per-request
+    resolver supplied together. No request header can turn this option on.
     """
     if not isinstance(dispatcher, RequesterDispatcher):
         raise ExpenseError("本人別の認証・接続ディスパッチが必要です。")
+    if (history_runtime is None) != (history_resolver is None):
+        raise ExpenseError("履歴には検証済みの実行情報と読取接続の両方が必要です。")
+    if history_runtime is not None:
+        from _foundation.history_runtime import ConversationRuntime
+        if not isinstance(history_runtime, ConversationRuntime) or not callable(history_resolver):
+            raise ExpenseError("履歴には信頼済みの接続アダプターが必要です。")
     if (
         not isinstance(public_host, str)
         or not public_host
@@ -126,6 +148,7 @@ def create_app(dispatcher, public_host):
         service, receipt_reader=service.read_receipt,
         tool_catalog=lambda: dispatcher.available_operations(service._context()),
         receipt_resources=dispatcher.receipt_resources,
+        conversation_reader=history_runtime,
     )
     transport = server.streamable_http_app(
         stateless_http=True,
@@ -135,4 +158,7 @@ def create_app(dispatcher, public_host):
             allowed_hosts=[public_host], allowed_origins=["https://" + public_host]
         ),
     )
-    return RequestAuthorization(transport, dispatcher, context)
+    return RequestAuthorization(
+        transport, dispatcher, context,
+        history_runtime=history_runtime, history_resolver=history_resolver,
+    )

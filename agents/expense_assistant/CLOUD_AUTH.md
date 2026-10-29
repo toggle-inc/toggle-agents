@@ -69,6 +69,26 @@ memory、過去科目の候補、領収書取得・保存・OCR、書込・draft
 
 ## DBと権限
 
+### 任意の履歴接続（コードのみ、既定無効）
+
+`requester_mcp.create_app` は `history_runtime` と `history_resolver` を両方明示したときだけ、
+エージェント内の `ConversationRuntime` をHTTPリクエストへ接続できます。通常のcloud factoryは
+この引数を渡しておらず、環境変数・HTTPヘッダー・モデル本文による自動有効化はありません。
+既存の本人OAuth認証を通った後、trusted resolverが現在の元会話と実行の束縛を検証し、
+明示的なアカウントリンクに基づく `HistoryRequestBinding` を返す必要があります。
+canonical本人/tenantがOAuthの本人と異なる、期限が本人認証を超える、不正な束縛は履歴通信前に401で拒否します。
+署名済みでもEngineのactor IDをcanonical本人IDと同一視しません。
+
+このresolverは接続先が管理する信頼済みコードであり、リクエスト本文をそのままデコードする関数ではありません。
+署名・issuer・audience・request・現在session・失効・明示account linkを検証するtransport adapterは別途必要です。
+この追加自体には本番のproof受信や新しい認証情報は含まれません。
+履歴ツールの取得・範囲選別・鮮度検査はagent内のfoundationが担当します。実行が例外になっても
+本人bearerと履歴コンテキストを解除し、別リクエストへ「最新会話」を共有しません。
+履歴ツールを使うためにMFやcalendarの権限を増やすこともありません。
+
+`test_history_requester_mcp` は実SDKのHTTP/JSON-RPC入口で、合成の署名検証代替resolverと
+合成履歴を使う検証です。実SAからの履歴接続やLLMの文脈継承成功、クラウド長期記憶の復元を示しません。
+
 配置担当者が専用DB/roleを確認し、`runtime/postgres_auth_schema.sql` を管理者として適用します。schemaは `expense_assistant_auth`、tableは `auth_records` です。runtime roleに必要なのはschemaのUSAGE、tableのSELECT/INSERT/UPDATEのみです。既存アプリDBや広い管理者roleを指定しないでください。アプリはDDLを実行せず、Postgresの取引とロックを既存API経由で使います。`/health` はプロセス生存確認のみでDB疎通を検査しません。DB疎通・権限は配置担当者が別途確認します。
 
 provider tokenは専用鍵、namespace、検証済みrequester owner、providerに束縛して暗号化保存します。既存provider tokenの移行・読み込みは行いません。各本人が新たに接続します。鍵やnamespaceを変更すると既存vaultを読めなくなるため、配置担当者が鍵保管と変更手順を管理します。
