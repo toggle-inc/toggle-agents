@@ -2,7 +2,9 @@
 
 import unittest
 
-from foundation import test_conversation, test_history_sources, test_platform_identity
+from foundation import (
+    test_conversation, test_history_runtime, test_history_sources, test_platform_identity,
+)
 from scripts.sync_foundation import sync
 
 
@@ -14,5 +16,6 @@ class FoundationPackagingTests(unittest.TestCase):
 def load_tests(loader, tests, pattern):
     tests.addTests(loader.loadTestsFromModule(test_conversation))
     tests.addTests(loader.loadTestsFromModule(test_history_sources))
+    tests.addTests(loader.loadTestsFromModule(test_history_runtime))
     tests.addTests(loader.loadTestsFromModule(test_platform_identity))
     return tests

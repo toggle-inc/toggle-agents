@@ -16,6 +16,16 @@ Okta再ログインを必須にしない本人確認・個人ID対応・replay�
 配置後にリポジトリルートや別エージェントへアクセスする必要はありません。
 rootのテストは正本との一致と各フォルダの独立ビルドを検査します。
 
+## 実行基盤に依存しない組み立て
+
+`history_runtime.py` の `create_conversation_runtime` は明示的な `enabled=True` の場合だけ
+接続を初期化します。既定では資格情報の取得も通信もツール登録も行いません。
+`ConversationRuntime.bind(verified_invocation)` は検証済みの今回の実行をContextVarで隔離し、
+例外時も解除します。同じエージェント本体でSA／Buzzの固定アダプターを切り替えられます。
+Engineのimport、Engine固有のDB、履歴の自動注入は不要です。
+本人確認と署名・実行の束縛検証は `bind` の前に必要であり、このAPI単体は認証ではありません。
+具体例は [HISTORY_CONNECTIONS.md](HISTORY_CONNECTIONS.md) を参照してください。
+
 ## ホストとエージェントの境界
 
 1. 信頼済みホストが認証済みの依頼者・テナント・エージェント・プラットフォーム・

@@ -67,6 +67,35 @@ execution、expires_at の共通項目です。最初の発言は実APIから存
 
 ## 差分・限界
 
+### エージェント側の実行単位で接続する
+
+```python
+from _foundation.history_runtime import create_conversation_runtime
+
+history = create_conversation_runtime(
+    enabled=explicit_history_opt_in,  # 真偽値。省略時は無効
+    sources_factory=lambda: configured_agent_sources,
+)
+server = create_server(service, conversation_reader=history)
+
+# 署名・本人・元会話・今回の実行との束縛を検証したアプリケーションコードのみ。
+# HTTPヘッダーやモデル引数を直接 Invocation にして渡してはいけない。
+if history is not None:
+    with history.bind(verified_invocation):
+        run_current_request(server)
+else:
+    run_current_request(server)  # 既存経路。新しい認証や履歴通信を要求しない。
+```
+
+`configured_agent_sources` は例えば `{"success_assist": sa_source, "buzz": buzz_source}`。
+資格情報や履歴をEngineへ格納するための設定ではありません。取得・範囲選択・鮮度検査は
+エージェント内のアダプターとReaderが担当し、Engineは検証済み実行情報の受け渡しに限定します。
+非同期の実行でも各リクエストを個別に `bind` し、依頼者全体の「最新の会話」で代用しません。
+バックグラウンド処理へコンテキストを使い回さず、別の実行では改めて束縛を検証します。
+長期記憶はこの履歴Readerとは別の本人別ストアであり、この追加によって接続済みにはなりません。
+
+### 読取アダプターの制約
+
 - SAの投稿は編集後の本文を使い、削除の空行は返しません。起点／スレッドの削除は停止します。
 - Buzzの編集イベントは元投稿の発言者に一致するものだけを適用し、削除対象は返しません。
   削除・モデレーターの権限検査は認証済みリレーの書込検証を前提とします。
