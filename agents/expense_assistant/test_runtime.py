@@ -710,6 +710,8 @@ class RuntimeTests(unittest.TestCase):
         result = self.service.mf_receipt_status(identifier)
         self.assertEqual(result["status"], "awaiting_transaction")
         self.assertEqual(result["transactions"], [])
+        self.assertIn("同じ確認ID", result["next_step"])
+        self.assertEqual(result["review_office_id"], "office-a")
         row["mf_file"] = {"id": "file-a"}
         self.assertTrue(self.service.mf_receipt_status(identifier)["ocr_complete"])
 
@@ -719,6 +721,50 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result["status"], "uncorrelated")
         self.assertFalse(result["ocr_complete"])
         self.assertEqual(result["transactions"], [])
+        self.assertIn("新規明細を作らず", result["next_step"])
+        self.assertEqual(result["review_office_id"], "office-a")
+
+    def test_ocr_review_guidance_tracks_current_status_without_new_writes(self):
+        identifier = self._uploaded_for_status({"ex_transactions": [{"id": "tx-a"}]})
+        row = self.mf.rows["office-a"][0]
+        for automatic_status, expected in (
+            ("waiting_for_ocr_input", "processing"),
+            ("input_done", "input_complete"),
+            ("canceled", "needs_review"),
+            ("future-status", "unverified"),
+        ):
+            with self.subTest(automatic_status=automatic_status):
+                row["automatic_status"] = automatic_status
+                result = self.service.mf_receipt_status(identifier)
+                self.assertEqual(result["status"], expected)
+                self.assertEqual(result["review_url"], "https://expense.moneyforward.com/transactions")
+                self.assertEqual(result["review_link_kind"], "transaction_list")
+                self.assertEqual(result["review_company"], "架空商事A")
+                self.assertEqual(result["review_office_id"], "office-a")
+                self.assertFalse(result["submitted"])
+                self.assertEqual(result["writes_performed"], 0)
+                self.assertIn("架空商事A", result["next_step"])
+                self.assertTrue(result["status_message"])
+                if expected == "input_complete":
+                    self.assertIn("本人の確認", result["status_message"])
+                else:
+                    self.assertIn("再送", result["next_step"])
+        self.assertEqual(self.mf.writes, [])
+
+    def test_unknown_receipt_outcome_guidance_never_suggests_resending(self):
+        reference = self.files.save(b"%PDF-1.4\nsynthetic receipt", "application/pdf")["path"]
+        preview = self.service.mf_upload_receipt("office-a", reference)
+        self.approve(preview)
+        with patch.object(self.mf, "upload_receipt", side_effect=TimeoutError):
+            with self.assertRaises(TimeoutError):
+                self.service.mf_upload_receipt("office-a", reference, True, preview["preview_id"])
+        for _ in range(2):
+            result = self.service.mf_receipt_status(preview["preview_id"])
+            self.assertEqual(result["status"], "outcome_unknown")
+            self.assertFalse(result["ocr_complete"])
+            self.assertIn("再送せず", result["next_step"])
+            self.assertEqual(result["review_office_id"], "office-a")
+        self.assertEqual(self.mf.writes, [])
 
     def test_ocr_status_cancellation_error_or_unknown_status_never_complete(self):
         identifier = self._uploaded_for_status({"ex_transactions": [{"id": "tx-a"}]})
@@ -740,6 +786,8 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "not_submitted")
         self.assertFalse(result["ocr_complete"])
+        self.assertIn("まだ送信していません", result["status_message"])
+        self.assertEqual(result["review_office_id"], "office-a")
         self.assertEqual(self.mf.writes, [])
 
     def test_ocr_status_rejects_mismatched_file_or_wrong_operation(self):
