@@ -35,3 +35,12 @@ sourceとcallのissuerは個別に明示して検証します。配置時に誰�
 - **未確認**: 実SA/Buzzの前の投稿に合成印を置く→別の新規投稿でその印と先行assistantを参照→実際のモデル入力と回答を照合。別人・別thread・同時投稿・編集削除・退会で拒否される実機確認も必要。
 
 長期の本人の教え・保留は `expense_context` と本人別Stateの別機能です。ローカル保存は維持されていますが、クラウドの永続Stateと本人の確定UI、memory読取権限の実接続は未完です。履歴をつなぐことや、未提供のmemory広告を隠すことで長期記憶を復元したとは扱いません。
+
+
+## 既存Managed Agentへの影響境界
+
+`runtime/history_invocation_gate.py` は明示的な `enabled=True` の場合だけ、信頼済みhostが供給するvalidator factory、現在本人・実行のbinding resolver、transport proof loaderを呼ぶ準備用のgateです。既定値と明示的Falseでは常に何も解決せずNoneを返し、追加のcrypto import、鍵/設定読取、proof必須化、本人ログイン、HTTP、履歴tool登録を行いません。リクエストheader・本文・環境変数では有効化できません。有効化したgateも別のagent/接続のgateを変更しません。
+
+既存agent定義、cloud設定schema、接続、認証、応答、MCPルートは変更していません。新headerが未設定・不正でも未opt-in経路では無視し、既存の本人OAuth検査をそのまま行います。不完全な明示opt-inだけをfail closedにします。`test_history_isolation.py` は無効時に新callback・依存・networkを使わないこと、opt-inのinstance隔離と毎回のsession再検証、実SDKの既存HTTPでtool一覧/本人別結果/401が変わらず、履歴HTTP・proof検査が増えないことを合成検証します。
+
+このgate自体も現在のhostへ未配線です。Engine側の明示opt-inと汎用wire、SA側source handle、hostのrequest-local reader注入が揃うまで有効にはなりません。別repositoryの既存Managed Agent全体の実機影響は、Engine担当の既定無効回帰と合わせて確認する必要があります。
