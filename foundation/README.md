@@ -25,6 +25,9 @@ rootのテストは正本との一致と各フォルダの独立ビルドを検�
 Engineのimport、Engine固有のDB、履歴の自動注入は不要です。
 本人確認と署名・実行の束縛検証は `bind` の前に必要であり、このAPI単体は認証ではありません。
 具体例は [HISTORY_CONNECTIONS.md](HISTORY_CONNECTIONS.md) を参照してください。
+署名・異なるID名前空間・原子的replay検査とsourceの一回session束縛の契約は
+[EXECUTION_BINDING.md](EXECUTION_BINDING.md) を参照してください。
+この検証もagent側の任意機能であり、署名発行側や実SA APIの接続完了とは区別します。
 
 ## ホストとエージェントの境界
 

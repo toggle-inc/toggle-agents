@@ -1,5 +1,12 @@
 # 実行ごとの会話履歴接続契約案
 
+> **旧草案。実transportへは使用しません。** canonical personをruntime proofに要求するなど、
+> 名前空間とHTTP要求の束縛に不足があります。現在の共通検証契約とコードは
+> [`_foundation/EXECUTION_BINDING.md`](_foundation/EXECUTION_BINDING.md)、
+> `ExternalExecutionVerifier` と `runtime/external_history_resolver.py` です。
+> 以下と旧 `history_invocation.py` / gateは比較用の未接続コードであり、両protocolを混ぜません。
+> 新しい検証・HTTP注入ができても、実source API・永続handle・起動barrierはまだ接続していません。
+
 状態: **未接続の設計・純粋validatorのみ**。現行の外部OAuth MCP接続には実行ごとの証明を運ぶ経路がなく、この文書・テスト・`runtime/history_invocation.py` の追加で会話継承が復元したとは扱いません。新しい鍵、scope、Engine変更、クラウド配置は含みません。SA/Buzzの履歴の読み方の正本は引き続き `foundation/` とその同梱版です。本案はそのreaderへ信頼済みInvocationを渡す前段の候補であり、業務判断を入口やEngineへ移すものではありません。
 
 ## 独立した2つの証明

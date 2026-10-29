@@ -80,14 +80,22 @@ canonical本人/tenantがOAuthの本人と異なる、期限が本人認証を�
 署名済みでもEngineのactor IDをcanonical本人IDと同一視しません。
 
 このresolverは接続先が管理する信頼済みコードであり、リクエスト本文をそのままデコードする関数ではありません。
-署名・issuer・audience・request・現在session・失効・明示account linkを検証するtransport adapterは別途必要です。
-この追加自体には本番のproof受信や新しい認証情報は含まれません。
+実際の署名発行元と、現在session・source失効を確認するsource adapterの接続が別途必要です。
+この追加自体には本番の署名発行や新しい認証情報は含まれません。
 履歴ツールの取得・範囲選別・鮮度検査はagent内のfoundationが担当します。実行が例外になっても
 本人bearerと履歴コンテキストを解除し、別リクエストへ「最新会話」を共有しません。
 履歴ツールを使うためにMFやcalendarの権限を増やすこともありません。
 
 `test_history_requester_mcp` は実SDKのHTTP/JSON-RPC入口で、合成の署名検証代替resolverと
 合成履歴を使う検証です。実SAからの履歴接続やLLMの文脈継承成功、クラウド長期記憶の復元を示しません。
+
+任意の `runtime.external_history_resolver.ExternalHistoryResolver` は、上記trusted resolverの
+署名検証・本人リンク照合部分を実装します。実bytes/固定targetはopt-in middlewareだけが
+計算して供給します。source APIの認可済み解決adapterと全instance共有replayストアは
+別途接続が必要です。短命proofのissuer/key設定や発行側はこのcloud factoryへ自動追加しません。
+仕様と未完了条件は同梱の [`EXECUTION_BINDING.md`](_foundation/EXECUTION_BINDING.md) を参照してください。
+`test_signed_history_http` は実resolver・署名・SDK・Reader・SA形式アダプターまで通しますが、
+source registryとデータは合成fixtureです。本番のsource/sessionをfirst-readで自動束縛しません。
 
 配置担当者が専用DB/roleを確認し、`runtime/postgres_auth_schema.sql` を管理者として適用します。schemaは `expense_assistant_auth`、tableは `auth_records` です。runtime roleに必要なのはschemaのUSAGE、tableのSELECT/INSERT/UPDATEのみです。既存アプリDBや広い管理者roleを指定しないでください。アプリはDDLを実行せず、Postgresの取引とロックを既存API経由で使います。`/health` はプロセス生存確認のみでDB疎通を検査しません。DB疎通・権限は配置担当者が別途確認します。
 

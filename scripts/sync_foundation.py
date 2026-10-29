@@ -19,6 +19,9 @@ FILES = (
     "platform_identity.py",
     "test_platform_identity.py",
     "PLATFORM_IDENTITY.md",
+    "execution_binding.py",
+    "test_execution_binding.py",
+    "EXECUTION_BINDING.md",
 )
 
 

@@ -6,7 +6,9 @@ callback verifies the resource-specific per-person Bearer token on EVERY call.
 Never pass the legacy owner key or a tenant-wide Engine execution JWT here.
 """
 
+import asyncio
 import functools
+import hashlib
 import inspect
 from contextlib import ExitStack
 from contextvars import ContextVar
@@ -21,9 +23,51 @@ from runtime.state import ExpenseError
 class RequestAuthorization:
     """Pure ASGI middleware, with an isolated context for each HTTP request."""
 
-    def __init__(self, app, dispatcher, context, *, history_runtime=None, history_resolver=None):
+    def __init__(self, app, dispatcher, context, *, history_runtime=None, history_resolver=None,
+                 history_target=None):
         self.app, self.dispatcher, self.context = app, dispatcher, context
         self.history_runtime, self.history_resolver = history_runtime, history_resolver
+        self.history_target = history_target
+        if history_runtime is not None and history_target is None:
+            raise ExpenseError("A fixed history resource target is required")
+
+    async def _history_request(self, scope, receive):
+        """Bind exact bytes before the trusted verifier; never log the body."""
+        from _foundation.execution_binding import ExecutionRequest
+
+        if (scope.get("method") not in {"GET", "POST", "DELETE"}
+                or scope.get("path") != "/mcp" or scope.get("query_string", b"")
+                or scope.get("raw_path", b"/mcp") != b"/mcp"):
+            raise ExpenseError("Invalid history request")
+        parts, size = [], 0
+        async with asyncio.timeout(10):
+            while True:
+                event = await receive()
+                if event.get("type") != "http.request" or not isinstance(event.get("body", b""), bytes):
+                    raise ExpenseError("Invalid history request")
+                body = event.get("body", b"")
+                size += len(body)
+                if size > 262144:
+                    raise ExpenseError("Invalid history request")
+                parts.append(body)
+                if not event.get("more_body", False):
+                    break
+        data = b"".join(parts)
+        received = False
+
+        async def replay_receive():
+            nonlocal received
+            if not received:
+                received = True
+                return {"type": "http.request", "body": data, "more_body": False}
+            return await receive()
+
+        return {
+            **scope,
+            "agent_execution_request": ExecutionRequest(
+                scope["method"], self.history_target, hashlib.sha256(data).hexdigest()
+            ),
+        }, replay_receive
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -44,7 +88,8 @@ class RequestAuthorization:
             if self.history_runtime is not None:
                 from runtime.history_request import HistoryRequestBinding
                 try:
-                    binding = self.history_resolver(scope, person)
+                    verified_scope, receive = await self._history_request(scope, receive)
+                    binding = self.history_resolver(verified_scope, person)
                     if not isinstance(binding, HistoryRequestBinding) or not binding.matches(person):
                         raise ExpenseError("Invalid history binding")
                     history_scope.enter_context(self.history_runtime.bind(binding.invocation))
@@ -161,4 +206,5 @@ def create_app(dispatcher, public_host, *, history_runtime=None, history_resolve
     return RequestAuthorization(
         transport, dispatcher, context,
         history_runtime=history_runtime, history_resolver=history_resolver,
+        history_target="https://" + public_host + "/mcp" if history_runtime is not None else None,
     )

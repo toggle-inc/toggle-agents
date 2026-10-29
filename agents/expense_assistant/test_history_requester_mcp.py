@@ -1,6 +1,7 @@
 """Actual SDK HTTP with synthetic trusted identity/source verification only."""
 
 import asyncio
+import hashlib
 from contextvars import ContextVar
 from dataclasses import replace
 import json
@@ -166,6 +167,7 @@ class HistoryHTTPTests(unittest.IsolatedAsyncioTestCase):
         middleware = RequestAuthorization(
             explode, self.dispatcher, context, history_runtime=self.runtime,
             history_resolver=lambda scope, person: self.bindings[person.person_id],
+            history_target="https://expense.example.test/mcp",
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=middleware), base_url="https://expense.example.test"
@@ -174,3 +176,60 @@ class HistoryHTTPTests(unittest.IsolatedAsyncioTestCase):
                 await client.post("/mcp", headers={"authorization": "Bearer " + self.tokens["alice"]})
         self.assertIsNone(context.get())
         self.assertEqual(self.runtime.read()["status"], "unavailable")
+
+    @with_server
+    async def test_transport_computes_exact_body_and_fixed_target_not_headers(self):
+        seen = []
+
+        def resolve(scope, person):
+            seen.append(scope["agent_execution_request"])
+            return self.bindings[person.person_id]
+
+        self.app.history_resolver = resolve
+        body = b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+        reply = await self.client.post(
+            "/mcp", content=body,
+            headers={**self.headers, "content-type": "application/json",
+                     "authorization": "Bearer " + self.tokens["alice"],
+                     "x-forwarded-host": "evil.example.test"},
+        )
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].target, "https://expense.example.test/mcp")
+        self.assertEqual(seen[0].method, "POST")
+        self.assertEqual(seen[0].body_sha256, hashlib.sha256(body).hexdigest())
+
+    @with_server
+    async def test_oversized_or_noncanonical_request_stops_before_proof_and_source(self):
+        for path, body in (("/mcp", b"x" * 262145), ("/mcp?redirect=1", b"{}"),
+                           ("/other", b"{}"), ("/%6dcp", b"{}")):
+            reply = await self.client.post(
+                path, content=body,
+                headers={**self.headers, "authorization": "Bearer " + self.tokens["alice"]},
+            )
+            self.assertEqual(reply.status_code, 401)
+        self.assertEqual(self.resolver_calls, [])
+        self.assertTrue(all(not api.calls for api in self.apis.values()))
+
+    @with_server
+    async def test_chunked_body_is_replayed_to_sdk_and_bound_to_its_actual_bytes(self):
+        body = b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+        seen = []
+
+        def resolve(scope, person):
+            seen.append(scope["agent_execution_request"].body_sha256)
+            return self.bindings[person.person_id]
+
+        self.app.history_resolver = resolve
+
+        async def chunks():
+            yield body[:15]
+            yield body[15:]
+
+        reply = await self.client.post(
+            "/mcp", content=chunks(),
+            headers={**self.headers, "content-type": "application/json",
+                     "authorization": "Bearer " + self.tokens["alice"]},
+        )
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(seen, [hashlib.sha256(body).hexdigest()])
