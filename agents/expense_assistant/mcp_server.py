@@ -59,24 +59,25 @@ def create_server(service, *, receipt_reader=None, conversation_reader=None,
                   tool_catalog=None, receipt_resources=True):
     from mcp.server.mcpserver import MCPServer
 
+    # This catalog is a ceiling for expense operations only. Foundation tools
+    # have their own authenticated readers and must not inherit MF/memory scope.
+    expense_tools = ORIGINAL_TOOLS + (
+        "delivery_contract", "expense_context", "propose_teaching",
+        "read_reference", "mf_receipt_status", "mf_save_draft",
+    )
+
     class CatalogServer(MCPServer):
         async def list_tools(self):
             tools = await super().list_tools()
             if tool_catalog is None:
                 return tools
             available = tool_catalog()
-            return [tool for tool in tools if tool.name in available]
+            return [tool for tool in tools
+                    if tool.name not in expense_tools or tool.name in available]
 
     server = CatalogServer("expense-assistant")
     register_history_tool(server, conversation_reader)
-    for name in ORIGINAL_TOOLS + (
-        "delivery_contract",
-        "expense_context",
-        "propose_teaching",
-        "read_reference",
-        "mf_receipt_status",
-        "mf_save_draft",
-    ):
+    for name in expense_tools:
         method = getattr(service, name)
 
         def make_callback(operation, bound):
