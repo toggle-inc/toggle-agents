@@ -84,3 +84,11 @@ Cloud Run request logやSA/Vercel側のURL記録はアプリloggingと別です�
 `resolve_connection` は常にNoneを返します。OAuth認証やprovider接続が成功しても、requester別のtool grantは付与しません。`/mcp` のディスパッチはfail closedです。将来ツールを有効にするときは、検証済み本人・capability・有効期限・対象serviceを束縛した `ConnectionGrant` を返すtrusted resolverを別途実装します。
 
 ローカル検証はagentフォルダから `python -m unittest test_cloud_auth_app test_platform_login test_provider_host test_service_connections test_authorization_host test_provider_vault -v`、リポジトリルートから `python -m unittest discover -s tests -v` を依存導入済み環境で行います。合成鍵・本人・SQLiteを使った検証であり、実MF/Google、クラウドDB、IAM、配置成功を示しません。
+
+## 本人限定検証から社員展開へ
+
+本人限定は利用対象の設定であり、個人専用のコードやサービスを社員ごとに作る設計ではありません。同じホスト・provider adapterを使い、検証済み本人のtenant/person/providerをキーに同意・tokenを分離します。社員自身によるAPIキー・環境変数・CLI設定は不要とし、接続GUIで自分のサービスへ初回ログイン・同意します。共有するのはアプリ情報のみで、管理者の個人tokenを社員へ共有しません。
+
+初期検証後の展開には、管理者が確認した社員ID一覧による本人リンクの一括登録、プラットフォーム側の利用対象設定、本人別MCP grant resolverの接続が必要です。人数や更新頻度に応じて本人リンクは専用ストアの登録簿へ分離します。メール文字列の一致だけによる自動登録はしません。他の入口も、同じ本人への管理済みリンクと入口ごとの署名trustを登録します。
+
+全社員への利用許可の前に、異なる実利用者2名以上で、他人のtoken・データ・DMに到達しないこと、同意拒否・失効・退職時のtoken失効、refresh後の読み取り、本人と当該エージェントの非公開会話への配送を確認します。Googleアプリの組織内公開設定、providerの許可・制限、ログと保存期間、DB接続数・同時実行上限も配置担当者が確認します。MFの実書き込みはdurableな承認・重複防止ストアを結合した後の別の受入項目です。
