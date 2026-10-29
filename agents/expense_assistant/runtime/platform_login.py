@@ -44,6 +44,7 @@ class _VerifiedPlatformRequests:
             "/oauth/consent",
             "/connections",
             "/connections/start",
+            "/connections/callback",
         }:
             return await self.app(scope, receive, send)
         try:
@@ -60,7 +61,7 @@ class _VerifiedPlatformRequests:
                 or values(b"host") != [urlsplit(origin).netloc]
                 or len(proofs) != 1
                 or len(source_origin) > 1
-                or scope["method"] != ("GET" if scope["path"] in {"/oauth/authorize", "/connections"} else "POST")
+                or scope["method"] != ("GET" if scope["path"] in {"/oauth/authorize", "/connections", "/connections/callback"} else "POST")
             ):
                 raise PlatformIdentityError
             chunks, size = [], 0

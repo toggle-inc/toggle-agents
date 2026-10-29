@@ -34,9 +34,10 @@ class ServiceConnections:
 
     STATES = frozenset({"connected", "not_connected", "expired", "unavailable"})
 
-    def __init__(self, store, *, providers, status, begin, clock=time.time):
+    def __init__(self, store, *, providers, status, begin, complete=None, clock=time.time):
         self.store, self.status, self.begin, self.clock = store, status, begin, clock
         self.providers = {provider.id: provider for provider in providers}
+        self._complete = complete
         if not self.providers or len(self.providers) != len(providers):
             raise ValueError("Explicit unique service providers required")
         for key, provider in self.providers.items():
@@ -88,14 +89,17 @@ class ServiceConnections:
                     state = "unavailable"
             except Exception:
                 state = "unavailable"
-            result.append({"id": provider.id, "label": provider.label, "status": state})
+            result.append({"id": provider.id, "label": provider.label, "status": state,
+                           "authorization_origins": sorted(provider.authorization_origins)})
         nonce = secrets.token_urlsafe(32)
+        expires_at = int(min(person.expires_at, self.clock() + 300))
         with self.store.transaction() as records:
             records.put("service-connect:" + hashlib.sha256(nonce.encode()).hexdigest(), {
-                "owner": person.owner, "expires_at": min(person.expires_at, self.clock() + 300),
+                "owner": person.owner, "expires_at": expires_at,
                 "used": False,
             })
         return {"schema_version": "agent-service-connections/v1", "csrf_token": nonce,
+                "agent_slug": "expense_assistant", "expires_at": expires_at,
                 "connections": result}
 
     def start(self, person, provider_id, nonce):
@@ -127,6 +131,30 @@ class ServiceConnections:
         except (ValueError, TypeError):
             raise ValueError("Invalid configured authorization destination") from None
         return target
+
+    def complete(self, person, provider_id, parameters):
+        """Only a verified private callback, never a model-selected owner or URL."""
+        self._person(person)
+        if provider_id not in self.providers or not callable(self._complete):
+            raise ValueError("Provider callback unavailable")
+        if not isinstance(parameters, dict):
+            raise ValueError("Invalid provider callback")
+        if provider_id == "calendar":
+            extra = {"scope", "authuser", "prompt", "hd", "iss"}
+            if parameters.get("iss", "https://accounts.google.com") != "https://accounts.google.com":
+                raise ValueError("Invalid provider issuer")
+            if not set(parameters) <= {"code", "state", "error"} | extra:
+                raise ValueError("Invalid provider callback")
+            parameters = {key: value for key, value in parameters.items() if key not in extra}
+        if set(parameters) not in (
+            {"code", "state"}, {"error", "state"},
+        ) or any(not isinstance(v, str) or not v or len(v) > 4096 for v in parameters.values()):
+            raise ValueError("Invalid provider callback")
+        # Provider adapter must check its own one-time state and exact person.
+        self._complete(person, provider_id, parameters)
+        state = self.status(person, provider_id)
+        return {"schema_version": "agent-service-connection-result/v1",
+                "provider": provider_id, "status": state if state in self.STATES else "unavailable"}
 
     def render(self, person, *, as_json=False):
         view = self.view(person)

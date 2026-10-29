@@ -158,6 +158,50 @@ class ServiceConnectionTests(platform_fixture.PlatformLoginTests):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(self.begun, [])
 
+    async def test_callback_requires_same_signed_person_and_discards_provider_secrets(self):
+        calls = []
+        def complete(person, provider, params):
+            if person.person_id != "alice" or params != {"code": "synthetic", "state": "alice-state"}:
+                raise ValueError("callback owner mismatch")
+            calls.append((person.person_id, provider))
+            self.states[("alice", "mf")] = "connected"
+            return {"access_token": "synthetic-secret-not-for-ui"}
+        self.manager._complete = complete
+        path = "/connections/callback?" + urlencode({
+            "provider": "mf", "code": "synthetic", "state": "alice-state",
+        })
+        wrong = await self.client.get(path, headers=self.signed("GET", path, person="bob"))
+        self.assertEqual(wrong.status_code, 400)
+        self.assertEqual(calls, [])
+        response = await self.client.get(path, headers={**self.signed("GET", path), "accept": "application/json"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {
+            "schema_version": "agent-service-connection-result/v1", "provider": "mf", "status": "connected",
+        })
+        self.assertNotIn("synthetic-secret", response.text)
+        self.assertEqual(calls, [("alice", "mf")])
+        self.assertIn("no-store", response.headers["cache-control"])
+        duplicate = path + "&state=another"
+        self.assertEqual((await self.client.get(duplicate, headers=self.signed("GET", duplicate))).status_code, 400)
+
+    async def test_google_callback_metadata_is_not_used_as_identity_or_permission(self):
+        self.manager.providers["calendar"] = ConnectionProvider(
+            "calendar", "Googleカレンダー", frozenset({"https://accounts.google.com"})
+        )
+        self.states[("alice", "calendar")] = "connected"
+        observed = []
+        self.manager._complete = lambda person, provider, params: observed.append((person.person_id, params))
+        path = "/connections/callback?" + urlencode({
+            "provider": "calendar", "code": "synthetic", "state": "synthetic-state",
+            "scope": "informational-not-a-permission-grant", "authuser": "0",
+            "hd": "not-an-identity-proof.example", "iss": "https://accounts.google.com",
+        })
+        response = await self.client.get(path, headers=self.signed("GET", path))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(observed, [("alice", {"code": "synthetic", "state": "synthetic-state"})])
+        invalid = path.replace("https%3A%2F%2Faccounts.google.com", "https%3A%2F%2Fattacker.example")
+        self.assertEqual((await self.client.get(invalid, headers=self.signed("GET", invalid))).status_code, 400)
+
 if __name__ == "__main__":
     import unittest
 

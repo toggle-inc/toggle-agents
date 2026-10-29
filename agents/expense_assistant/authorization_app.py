@@ -159,10 +159,24 @@ def create_app(
     async def endpoint(request):
         try:
             path = request.url.path
-            if path in {"/connections", "/connections/start"}:
+            if path in {"/connections", "/connections/start", "/connections/callback"}:
                 person = authority._login(request)
                 if service_connections is None:
                     return JSONResponse({"error": "service_connections_unavailable"}, status_code=503)
+                if path == "/connections/callback":
+                    params = _parameters(request.url.query)
+                    provider = params.pop("provider", None)
+                    try:
+                        result = service_connections.complete(person, provider, params)
+                    except Exception:
+                        return JSONResponse({"error": "service_connection_callback_failed"}, status_code=400)
+                    if request.headers.getlist("accept") == ["application/json"]:
+                        return JSONResponse(result)
+                    return HTMLResponse(
+                        '<!doctype html><html lang="ja"><meta charset="utf-8">'
+                        '<title>サービス連携の確認</title><h1>認証の応答を受け付けました</h1>'
+                        '<p>接続状態を確認してください。</p><a href="/connections">サービス連携へ戻る</a></html>'
+                    )
                 if path == "/connections":
                     if request.url.query:
                         raise AuthorizationError("invalid_request")
@@ -380,6 +394,7 @@ def create_app(
             ("/oauth/revoke", ["POST"]),
             ("/connections", ["GET"]),
             ("/connections/start", ["POST"]),
+            ("/connections/callback", ["GET"]),
         )
     ]
     if login_adapter is not None:
