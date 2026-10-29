@@ -127,7 +127,6 @@ class ServiceConnectionTests(platform_fixture.PlatformLoginTests):
         })
         self.assertEqual(response.status_code, 401)
         self.assertEqual(self.begun, [])
-
     async def test_missing_deployment_adapter_never_claims_connected(self):
         app = self.login.wrap(create_app(self.authority, self.resolve, platform_login=self.login))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=self.origin) as client:
@@ -159,3 +158,7 @@ class ServiceConnectionTests(platform_fixture.PlatformLoginTests):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(self.begun, [])
 
+if __name__ == "__main__":
+    import unittest
+
+    unittest.main()
