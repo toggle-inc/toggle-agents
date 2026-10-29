@@ -147,6 +147,17 @@ class PersonalConnectionJourneyTests(unittest.IsolatedAsyncioTestCase):
             })
             self.assertEqual(reply.status_code, 200, reply.text)
             tokens[name] = reply.json()["access_token"]
+        # A genuine mf:read consent lists only usable operations before the
+        # first business call, without a memory/receipt/calendar consent detour.
+        for name in tokens:
+            catalog = await self.client.post("/mcp", headers={
+                "authorization": "Bearer " + tokens[name],
+                "accept": "application/json, text/event-stream",
+                "mcp-protocol-version": "2025-03-26",
+            }, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+            self.assertEqual(catalog.status_code, 200, catalog.text)
+            self.assertEqual({t["name"] for t in catalog.json()["result"]["tools"]},
+                             {"mf_offices", "mf_list_transactions", "mf_list_reports"})
         # The provider access token expires. No GUI login/consent is repeated.
         self.provider_now += 601
         for name in ("alice", "bob"):

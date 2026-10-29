@@ -147,6 +147,16 @@ class AuthorizationRequiredError(ExpenseError):
         )
 
 
+class OperationUnavailableError(ExpenseError):
+    code = "operation_unavailable"
+
+    def __init__(self):
+        super().__init__(
+            "operation_unavailable: この接続ではこの操作は提供されていません。"
+            "再同意や他サービスの再接続は不要です。利用可能なツールで続けてください。"
+        )
+
+
 class RequesterDispatcher:
     """Invoke from trusted adapter code with opaque per-request auth context.
 
@@ -162,11 +172,38 @@ class RequesterDispatcher:
 
     def __init__(self, authenticate, resolve, *, clock=time.time):
         self._authenticate, self._resolve, self._clock = authenticate, resolve, clock
+        # Trusted deployment implementation ceiling; never supplied by the model.
+        self.supported_operations = frozenset(getattr(resolve, "supported_operations", OPERATIONS))
+        if not self.supported_operations <= OPERATIONS.keys():
+            raise ValueError("Unknown supported expense operation")
+        self.receipt_resources = "mf_get_receipt" in self.supported_operations
+
+    def available_operations(self, request_context):
+        """Fresh catalog, intersect implementation, authority and provider grants.
+
+        This is discovery only. Calls always repeat authentication and resolution.
+        No service/credential survives beyond this method or gets cached in MCP.
+        """
+        self.validate_request(request_context)
+        allowed = set()
+        for capability in {OPERATIONS[name] for name in self.supported_operations}:
+            try:
+                self._service(request_context, capability)
+            except ExpenseError:
+                continue
+            allowed.add(capability)
+        return {name for name in self.supported_operations if OPERATIONS[name] in allowed} | (
+            {"mf_create_transaction", "mf_upload_receipt"} & self.supported_operations
+            if "mf:draft" in allowed else set()
+        )
 
     def call(self, request_context, operation, arguments):
         capability = OPERATIONS.get(operation) if isinstance(operation, str) else None
         if capability is None or not isinstance(arguments, dict):
             raise ExpenseError("未対応の経費操作です。")
+        self.validate_request(request_context)
+        if operation not in self.supported_operations:
+            raise OperationUnavailableError()
         # Identity, connection IDs, credentials and approvals are never tool args.
         try:
             inspect.signature(getattr(ExpenseService, operation)).bind(None, **arguments)
@@ -186,6 +223,9 @@ class RequesterDispatcher:
 
     def read_receipt(self, request_context, reference):
         """Trusted resource adapter path; never use a global service.receipts."""
+        self.validate_request(request_context)
+        if not self.receipt_resources:
+            raise OperationUnavailableError()
         service = self._service(request_context, "receipt:read")
         with service._lock:
             return service._require(service.receipts, "領収書").payload(reference)

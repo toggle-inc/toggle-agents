@@ -19,7 +19,7 @@ from runtime.personal_calendar import PersonalCalendar
 from runtime.personal_mf import PersonalMF
 from runtime.provider_host import ProviderHost, ProviderHostSettings
 from runtime.provider_vault import EncryptedProviderVault
-from runtime.provider_execution import ProviderExecutionResolver
+from runtime.provider_execution import ProviderExecutionResolver, READ_OPERATIONS
 
 
 def _fields(value, required, optional=()):
@@ -192,6 +192,8 @@ def create_app(*, environ=None, store_factory=None):
     def resolve_connection(person, capability):
         resolver = execution.get("resolver")
         return resolver(person, capability) if resolver is not None else None
+
+    resolve_connection.supported_operations = READ_OPERATIONS
 
     def bind_execution(store, providers):
         execution["resolver"] = ProviderExecutionResolver(

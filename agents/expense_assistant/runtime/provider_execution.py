@@ -13,6 +13,13 @@ from .requester import ConnectionGrant, Requester, _unexpired, _valid_id
 from .service import ExpenseService
 from .state import ExpenseError
 
+# Only operations tested with this stateless read service are exposed. MF memory,
+# historical item suggestions, receipt storage/OCR and write flows stay disabled.
+READ_OPERATIONS = frozenset({
+    "mf_offices", "mf_list_transactions", "mf_list_reports",
+    "calendar_events", "delivery_contract",
+})
+
 READ_CAPABILITIES = frozenset({"mf:read", "calendar:read", "contract:read"})
 
 
@@ -59,6 +66,7 @@ class ProviderExecutionResolver:
     deployment tenant_id additionally fences callers before provider access.
     """
 
+    supported_operations = READ_OPERATIONS
     CAPABILITIES = {"mf:read": "mf", "calendar:read": "calendar", "contract:read": None}
 
     def __init__(self, providers, store, namespace, clock=time.time, *,

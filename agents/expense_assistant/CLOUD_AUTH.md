@@ -59,6 +59,14 @@ Mac固有のcertifiパスは配置担当者がDSN Secret作成時に上記Linux�
 
 設定済みproviderの実障害・status取得例外は `unavailable` のままです。v1 enum拡張のため、[反映順序](SERVICE_CONNECTIONS.md#v1状態の拡張と反映順序)に従いSA側のsuperset対応をruntimeより先に反映します。Googleアプリ設定・クラウド反映・順序調整はmain担当が行います。
 
+## 読み取り実行のツール一覧
+
+初期クラウド経路は `ProviderExecutionResolver.supported_operations` の操作だけを提供します。HTTPの `tools/list` は、その上限と毎回検証した本人の同意・provider接続の共通範囲を返します。`mf:read` だけのclientには `mf_offices`、`mf_list_transactions`、`mf_list_reports` を提示し、MFの本人接続が利用可能なら実行できます。calendarと配送契約は各能力の同意・実装が揃った場合だけ提示します。
+
+memory、過去科目の候補、領収書取得・保存・OCR、書込・draft保存はこの経路では未提供です。直接呼ばれても `operation_unavailable` とし、再同意やMF全体の再接続を求めません。ツール一覧は認可の代替ではなく、実行時にも本人・tenant・scope・失効と接続を検証します。ローカルstdio入口は従来の全操作・領収書resourceを保持します。
+
+この修正の合成テストは実際のHTTP JSON-RPC、本人別OAuth同意と暗号化vaultを通りますが、クラウド配置・Engine公開版更新・実MFデータ読み取りの成功証跡ではありません。
+
 ## DBと権限
 
 配置担当者が専用DB/roleを確認し、`runtime/postgres_auth_schema.sql` を管理者として適用します。schemaは `expense_assistant_auth`、tableは `auth_records` です。runtime roleに必要なのはschemaのUSAGE、tableのSELECT/INSERT/UPDATEのみです。既存アプリDBや広い管理者roleを指定しないでください。アプリはDDLを実行せず、Postgresの取引とロックを既存API経由で使います。`/health` はプロセス生存確認のみでDB疎通を検査しません。DB疎通・権限は配置担当者が別途確認します。

@@ -285,5 +285,95 @@ class RequesterMCPTests(unittest.IsolatedAsyncioTestCase):
             self.dispatcher.call(None, "mf_offices", {})
 
 
+class ReadOnlyCatalogTests(unittest.IsolatedAsyncioTestCase):
+    rpc = RequesterMCPTests.rpc
+
+    async def asyncSetUp(self):
+        from types import SimpleNamespace
+        from runtime.provider_execution import ProviderExecutionResolver
+        from test_authorization import MemoryStore
+        from test_provider_execution import FakeProvider
+
+        self.now = 100
+        self.tokens = {name: "synthetic-read-token-" + name for name in ("alice", "bob")}
+        self.people = {self.tokens[name]: Requester(
+            "synthetic-tenant", name, 200, capabilities=frozenset({"mf:read"})
+        ) for name in self.tokens}
+        self.providers = SimpleNamespace(mf=FakeProvider(), calendar=FakeProvider())
+        self.providers.mf.states = {p.owner: "connected" for p in self.people.values()}
+        self.resolver = ProviderExecutionResolver(
+            self.providers, MemoryStore(), "synthetic", lambda: self.now,
+            tenant_id="synthetic-tenant",
+        )
+        self.dispatcher = RequesterDispatcher(self.people.get, self.resolver, clock=lambda: self.now)
+        self.app = create_app(self.dispatcher, "expense.example.test")
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app), base_url="https://expense.example.test"
+        )
+        self.addAsyncCleanup(self.client.aclose)
+        self.headers = {"accept": "application/json, text/event-stream",
+                        "mcp-protocol-version": "2025-03-26"}
+
+    async def catalog(self, name="alice"):
+        response = await self.rpc(name, "tools/list", {})
+        self.assertEqual(response.status_code, 200, response.text)
+        return {t["name"] for t in response.json()["result"]["tools"]}
+
+    @with_server
+    async def test_mf_only_catalog_then_offices_never_requests_other_capabilities(self):
+        self.assertEqual(await self.catalog(), {
+            "mf_offices", "mf_list_transactions", "mf_list_reports",
+        })
+        for name in ("alice", "bob"):
+            result = (await self.rpc(name)).json()["result"]
+            self.assertFalse(result.get("isError"), result)
+            self.assertIn(name, json.dumps(result))
+            self.assertNotIn("bob" if name == "alice" else "alice", json.dumps(result))
+        self.assertEqual(self.providers.calendar.status_calls, [])
+        templates = (await self.rpc("alice", "resources/templates/list", {})).json()
+        self.assertEqual(templates["result"]["resourceTemplates"], [])
+
+    @with_server
+    async def test_hidden_memory_state_receipts_and_writes_are_unavailable_without_reconsent(self):
+        for operation, args in (
+            ("expense_context", {}), ("mf_known_items", {"office": "alice"}),
+            ("mf_payee_memory", {}),
+            ("mf_get_receipt", {"office": "alice", "transaction_id": "synthetic"}),
+            ("mf_save_draft", {"preview_id": "synthetic"}),
+            ("mf_create_transaction", {"office": "alice", "recognized_at": "2030-01-01",
+                                       "value": 100, "remark": "synthetic"}),
+        ):
+            result = (await self.rpc("alice", params={"name": operation, "arguments": args})).json()["result"]
+            self.assertTrue(result.get("isError"), result)
+            self.assertIn("operation_unavailable", json.dumps(result))
+            self.assertNotIn("requester_authorization_required", json.dumps(result))
+        self.assertEqual(self.providers.mf.status_calls, [])
+        self.assertFalse((await self.rpc("alice")).json()["result"].get("isError"))
+
+    @with_server
+    async def test_catalog_and_calls_recheck_scope_provider_revocation_and_tenant(self):
+        self.assertIn("mf_offices", await self.catalog())
+        person = self.people[self.tokens["alice"]]
+        self.providers.mf.states[person.owner] = "revoked"
+        self.assertEqual(await self.catalog(), set())
+        self.assertTrue((await self.rpc("alice")).json()["result"].get("isError"))
+        self.assertIn("mf_offices", await self.catalog("bob"))
+        self.providers.mf.states[person.owner] = "connected"
+        self.people[self.tokens["alice"]] = dataclasses.replace(person, capabilities=frozenset())
+        self.assertEqual(await self.catalog(), set())
+        self.assertTrue((await self.rpc("alice")).json()["result"].get("isError"))
+        self.people[self.tokens["alice"]] = dataclasses.replace(person, tenant_id="other")
+        self.assertEqual(await self.catalog(), set())
+        self.assertTrue((await self.rpc("alice")).json()["result"].get("isError"))
+        del self.people[self.tokens["alice"]]
+        self.assertEqual((await self.rpc("alice", "tools/list", {})).status_code, 401)
+
+    async def test_local_stdio_catalog_retains_all_tools_and_receipt_templates(self):
+        from mcp_server import create_server
+        server = create_server(self.resolver(self.people[self.tokens["alice"]], "mf:read").service)
+        self.assertEqual({tool.name for tool in await server.list_tools()}, set(OPERATIONS))
+        self.assertEqual(len(await server.list_resource_templates()), 4)
+
+
 if __name__ == "__main__":
     unittest.main()

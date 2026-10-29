@@ -55,10 +55,19 @@ DESCRIPTIONS = {
 }
 
 
-def create_server(service, *, receipt_reader=None, conversation_reader=None):
+def create_server(service, *, receipt_reader=None, conversation_reader=None,
+                  tool_catalog=None, receipt_resources=True):
     from mcp.server.mcpserver import MCPServer
 
-    server = MCPServer("expense-assistant")
+    class CatalogServer(MCPServer):
+        async def list_tools(self):
+            tools = await super().list_tools()
+            if tool_catalog is None:
+                return tools
+            available = tool_catalog()
+            return [tool for tool in tools if tool.name in available]
+
+    server = CatalogServer("expense-assistant")
     register_history_tool(server, conversation_reader)
     for name in ORIGINAL_TOOLS + (
         "delivery_contract",
@@ -103,6 +112,8 @@ def create_server(service, *, receipt_reader=None, conversation_reader=None):
             return callback
 
         server.tool(name=name, description=DESCRIPTIONS[name])(make_callback(name, method))
+    if not receipt_resources:
+        return server
     for extension, mime in (
         ("pdf", "application/pdf"),
         ("png", "image/png"),

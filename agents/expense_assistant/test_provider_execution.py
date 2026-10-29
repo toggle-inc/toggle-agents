@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from runtime.authorization import AgentAuthorization, PublicClient
 from runtime.provider_execution import READ_CAPABILITIES, ProviderExecutionResolver, read_service_factory
-from runtime.requester import AuthorizationRequiredError, Requester, RequesterDispatcher
+from runtime.requester import AuthorizationRequiredError, OperationUnavailableError, Requester, RequesterDispatcher
 from runtime.service import ExpenseService
 from runtime.state import ExpenseError
 from test_authorization import CHALLENGE, VERIFIER, MemoryStore
@@ -109,7 +109,7 @@ class ProviderExecutionTests(unittest.TestCase):
             ("mf_delete_transaction", {"office": "alice", "transaction_id": "synthetic"}),
             ("mf_save_draft", {"preview_id": "synthetic"}),
         ):
-            with self.subTest(operation=operation), self.assertRaises(AuthorizationRequiredError):
+            with self.subTest(operation=operation), self.assertRaises(OperationUnavailableError):
                 self.dispatcher.call("alice", operation, arguments)
         self.assertEqual(self.providers.mf.bindings, [])
 

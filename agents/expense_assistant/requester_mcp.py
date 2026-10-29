@@ -122,7 +122,11 @@ def create_app(dispatcher, public_host):
         raise ExpenseError("HTTPS接続窓口の正確なホスト名を指定してください。")
     context = ContextVar("expense_authenticated_bearer", default=None)
     service = _RequestService(dispatcher, context)
-    server = create_server(service, receipt_reader=service.read_receipt)
+    server = create_server(
+        service, receipt_reader=service.read_receipt,
+        tool_catalog=lambda: dispatcher.available_operations(service._context()),
+        receipt_resources=dispatcher.receipt_resources,
+    )
     transport = server.streamable_http_app(
         stateless_http=True,
         json_response=True,

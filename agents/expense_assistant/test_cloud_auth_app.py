@@ -164,7 +164,17 @@ class CloudAuthTests(unittest.IsolatedAsyncioTestCase):
                         'code': code, 'code_verifier': VERIFIER})
                     self.assertEqual(token.status_code, 200)
                     bearer = token.json()['access_token']
+                    catalog = await client.post('/mcp', headers={
+                        'authorization': 'Bearer ' + bearer,
+                        'accept': 'application/json, text/event-stream',
+                        'mcp-protocol-version': '2025-03-26'},
+                        json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list', 'params': {}})
+                    self.assertEqual(catalog.status_code, 200)
+                    self.assertEqual({t['name'] for t in catalog.json()['result']['tools']},
+                                     {'mf_offices', 'mf_list_transactions', 'mf_list_reports'})
+                    self.assertEqual(calls, [])
                     for operation, args, denied in [('mf_offices', {}, False),
+                            ('expense_context', {}, True),
                             ('mf_create_transaction', {'office': 'synthetic-company', 'recognized_at': '2030-01-01',
                              'value': 1, 'remark': 'synthetic'}, True)]:
                         result = await client.post('/mcp', headers={'authorization': 'Bearer ' + bearer,
@@ -173,6 +183,8 @@ class CloudAuthTests(unittest.IsolatedAsyncioTestCase):
                                   'params': {'name': operation, 'arguments': args}})
                         self.assertEqual(result.status_code, 200)
                         self.assertEqual(bool(result.json()['result'].get('isError')), denied, result.json())
+                        if denied:
+                            self.assertIn('operation_unavailable', result.text)
                     self.assertEqual(calls, [('GET', '/api/external/v1/offices')])
 
     async def test_mf_only_two_people_isolated_and_unknown_denied(self):
