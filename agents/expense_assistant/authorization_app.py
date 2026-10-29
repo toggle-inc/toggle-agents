@@ -41,8 +41,9 @@ def _parameters(value):
 
 
 class _PrivateHTTPS:
-    def __init__(self, app, origin):
+    def __init__(self, app, origin, *, connection_form_origins=()):
         self.app, self.origin = app, origin
+        self.connection_form_origins = tuple(connection_form_origins)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -60,6 +61,11 @@ class _PrivateHTTPS:
 
         async def private_send(message):
             if message["type"] == "http.response.start":
+                form_action = "form-action 'self'"
+                if scope.get("path") == "/connections" and self.connection_form_origins:
+                    # Chromium applies form-action to a POST's redirect chain.
+                    # Only this GUI may redirect to explicitly configured providers.
+                    form_action += " " + " ".join(self.connection_form_origins)
                 headers = [
                     (k, v)
                     for k, v in message.get("headers", ())
@@ -69,8 +75,8 @@ class _PrivateHTTPS:
                     (b"cache-control", b"no-store"),
                     (
                         b"content-security-policy",
-                        b"default-src 'none'; frame-ancestors 'none'; "
-                        b"form-action 'self'; base-uri 'none'",
+                        ("default-src 'none'; frame-ancestors 'none'; "
+                         + form_action + "; base-uri 'none'").encode("ascii"),
                     ),
                     (b"referrer-policy", b"no-referrer"),
                     (b"x-content-type-options", b"nosniff"),
@@ -97,6 +103,7 @@ def create_app(
     login_adapter=None,
     draft_consent=None,
     platform_login=None,
+    service_connections=None,
 ):
     """Host supplies SSO verification + private storage/providers, not auth logic.
 
@@ -118,6 +125,11 @@ def create_app(
         ):
             raise ValueError("Draft consent must use this same agent-owned authority")
     origin = authority.issuer
+    if service_connections is not None:
+        from runtime.service_connections import ServiceConnections
+
+        if not isinstance(service_connections, ServiceConnections) or service_connections.store is not authority.store:
+            raise ValueError("Service connections must use this same private store")
     if platform_login is not None:
         from runtime.platform_login import PlatformLogin
 
@@ -147,6 +159,28 @@ def create_app(
     async def endpoint(request):
         try:
             path = request.url.path
+            if path in {"/connections", "/connections/start"}:
+                person = authority._login(request)
+                if service_connections is None:
+                    return JSONResponse({"error": "service_connections_unavailable"}, status_code=503)
+                if path == "/connections":
+                    if request.url.query:
+                        raise AuthorizationError("invalid_request")
+                    return service_connections.render(
+                        person, as_json=request.headers.getlist("accept") == ["application/json"]
+                    )
+                if (platform_login is None and request.headers.getlist("origin") != [origin]) or (
+                    platform_login is not None and not platform_login.allows_consent_origin(request)
+                ):
+                    raise AuthorizationError("invalid_request")
+                params = await _form(request)
+                if set(params) != {"provider", "csrf_token"}:
+                    raise AuthorizationError("invalid_request")
+                try:
+                    target = service_connections.start(person, params["provider"], params["csrf_token"])
+                except Exception:
+                    return JSONResponse({"error": "service_connection_start_unavailable"}, status_code=503)
+                return RedirectResponse(target, status_code=303)
             if path == "/.well-known/oauth-authorization-server":
                 return JSONResponse(
                     {
@@ -344,6 +378,8 @@ def create_app(
             ("/oauth/consent", ["POST"]),
             ("/oauth/token", ["POST"]),
             ("/oauth/revoke", ["POST"]),
+            ("/connections", ["GET"]),
+            ("/connections/start", ["POST"]),
         )
     ]
     if login_adapter is not None:
@@ -354,4 +390,11 @@ def create_app(
             )
         )
     routes.append(Mount("/", app=mcp))
-    return _PrivateHTTPS(Starlette(routes=routes, lifespan=lifespan), origin)
+    return _PrivateHTTPS(
+        Starlette(routes=routes, lifespan=lifespan), origin,
+        connection_form_origins=sorted({
+            provider_origin
+            for provider in service_connections.providers.values()
+            for provider_origin in provider.authorization_origins
+        }) if service_connections is not None else (),
+    )
