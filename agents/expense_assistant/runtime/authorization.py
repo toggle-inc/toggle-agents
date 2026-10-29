@@ -248,6 +248,24 @@ class AgentAuthorization:
     def _consent_key(self, person, client_id):
         return self._key("consent", person.owner + "\n" + client_id)
 
+    def consented_requester(self, context, client_id, capabilities):
+        """Read-only execution readiness check; never creates consent or a token.
+
+        A platform login proves identity only. The agent's existing, explicit
+        per-person OAuth consent must independently authorize every capability.
+        """
+        person, client = self._login(context), self._client(client_id)
+        if (not isinstance(capabilities, frozenset) or not capabilities
+                or not capabilities <= client.capabilities):
+            raise AuthorizationError("invalid_scope")
+        with self.store.transaction() as records:
+            consent = records.get(self._consent_key(person, client_id))
+            if (not consent or consent.get("revoked", True)
+                    or not capabilities <= set(consent.get("capabilities", []))):
+                raise AuthorizationError("consent_required")
+        return Requester(person.tenant_id, person.person_id, person.expires_at,
+                         capabilities=capabilities)
+
     def _current(self, records, record, *, refresh=False):
         if not record or record.get("revoked", False):
             raise AuthorizationError()

@@ -7,6 +7,7 @@ import json
 import unittest
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
+from types import SimpleNamespace
 
 import httpx
 from cryptography.fernet import Fernet
@@ -16,6 +17,7 @@ from authorization_app import create_app
 from runtime.connection_providers import build_service_connections
 from runtime.personal_mf import PersonalMF
 from runtime.provider_vault import EncryptedProviderVault
+from runtime.provider_execution import ProviderExecutionResolver
 from runtime.requester import ConnectionGrant, Requester
 from runtime.service import ExpenseService
 from runtime.state import State
@@ -62,17 +64,8 @@ class PersonalConnectionJourneyTests(unittest.IsolatedAsyncioTestCase):
         self.manager = build_service_connections(
             self.fixture.store, mf=self.mf, clock=lambda: self.provider_now,
         )
-        self.services = {}
-        for name in ("alice", "bob"):
-            person = Requester("synthetic-tenant", name, self.now + 3000)
-            state = State(Path(self.fixture.directory.name) / name / "live-adapter-state.sqlite", person.owner)
-            self.addCleanup(state.close)
-            self.services[name] = ExpenseService(mf=self.mf.for_person(person), state=state, write_enabled=False)
-        def resolve(person, capability):
-            if capability != "mf:read" or self.mf.status(person, "mf") != "connected":
-                return None
-            return ConnectionGrant(person.tenant_id, person.person_id, self.now + 3000,
-                frozenset({"mf:read"}), self.services[person.person_id], agent_slug="expense_assistant")
+        resolve = ProviderExecutionResolver(SimpleNamespace(mf=self.mf, calendar=None),
+            self.fixture.store, self.origin, clock=lambda: self.now, tenant_id="synthetic-tenant")
         self.app = self.login.wrap(create_app(
             self.authority, resolve, platform_login=self.login, service_connections=self.manager,
         ))

@@ -18,11 +18,13 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from cloud_auth_app import create_app, main, resolve_connection, settings_from_environment
+from cloud_auth_app import create_app, main, settings_from_environment
 from _foundation.platform_identity import ASSERTION_TYPE
 from runtime.auth_store import SQLiteAuthorizationStore
 from runtime.provider_vault import EncryptedProviderVault
 from runtime.requester import Requester
+from runtime.personal_mf import PersonalMF
+from test_authorization import CHALLENGE, VERIFIER
 
 
 class CloudAuthTests(unittest.IsolatedAsyncioTestCase):
@@ -83,7 +85,6 @@ class CloudAuthTests(unittest.IsolatedAsyncioTestCase):
                                         ("https://other.test", "sa-tenant", "alice"),
                                         (self.config["platform_issuer"], "sa-tenant", "unknown")):
             self.assertIsNone(settings.resolve_person(issuer, tenant, subject))
-        self.assertIsNone(resolve_connection(Requester("expense-tenant", "person-alice", time.time() + 300), "mf:read"))
 
     def test_secrets_absent_from_repr_and_errors(self):
         env = self.environment()
@@ -124,6 +125,55 @@ class CloudAuthTests(unittest.IsolatedAsyncioTestCase):
                 factory.assert_not_called()
         with self.assertRaises(ValueError):
             create_app(environ={"DATABASE_URL": "shared", "MF_CLIENT_SECRET": "shared"})
+
+    async def test_cloud_factory_consent_to_personal_read_uses_real_resolver(self):
+        calls = []
+        def mf_response(request):
+            calls.append((request.method, request.url.path))
+            self.assertEqual(request.method, 'GET')
+            self.assertEqual(request.url.path, '/api/external/v1/offices')
+            self.assertEqual(request.headers['authorization'], 'Bearer synthetic-alice-access')
+            return httpx.Response(200, json={'offices': [{'id': 'synthetic-company', 'name': 'Synthetic'}]})
+        with httpx.Client(transport=httpx.MockTransport(mf_response), base_url='https://expense.moneyforward.com') as mf_http:
+            with patch('cloud_auth_app.PersonalMF', side_effect=lambda **kw: PersonalMF(**kw, http=mf_http)):
+                app = self.app()
+            settings = settings_from_environment(self.environment())
+            vault = EncryptedProviderVault(self.store, settings.encryption_key, namespace=settings.provider_namespace)
+            person = Requester('expense-tenant', 'person-alice', time.time() + 3600)
+            with vault.transaction(person.owner, 'mf') as row:
+                row.update(owner=person.owner, oauth={'access_token': 'synthetic-alice-access',
+                           'obtained_at': time.time(), 'expires_in': 3600})
+            web = app.app.app.app
+            async with web.router.lifespan_context(web):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=self.config['origin']) as client:
+                    callback = self.config['clients'][0]['redirect_uris'][0]
+                    path = '/oauth/authorize?' + urlencode({'response_type': 'code', 'client_id': 'sa',
+                        'redirect_uri': callback, 'resource': self.config['origin'] + '/mcp', 'scope': 'mf:read',
+                        'code_challenge': CHALLENGE, 'code_challenge_method': 'S256', 'state': 'synthetic-state'})
+                    page = await client.get(path, headers=self.signed('GET', path))
+                    self.assertEqual(page.status_code, 200)
+                    body = urlencode({'request_id': page.json()['request_id'],
+                                      'csrf_token': page.json()['csrf_token'], 'decision': 'approve'}).encode()
+                    consent = await client.post('/oauth/consent', content=body, headers={
+                        **self.signed('POST', '/oauth/consent', body=body),
+                        'content-type': 'application/x-www-form-urlencoded'})
+                    self.assertEqual(consent.status_code, 303)
+                    code = parse_qs(urlsplit(consent.headers['location']).query)['code'][0]
+                    token = await client.post('/oauth/token', data={'grant_type': 'authorization_code',
+                        'client_id': 'sa', 'redirect_uri': callback, 'resource': self.config['origin'] + '/mcp',
+                        'code': code, 'code_verifier': VERIFIER})
+                    self.assertEqual(token.status_code, 200)
+                    bearer = token.json()['access_token']
+                    for operation, args, denied in [('mf_offices', {}, False),
+                            ('mf_create_transaction', {'office': 'synthetic-company', 'recognized_at': '2030-01-01',
+                             'value': 1, 'remark': 'synthetic'}, True)]:
+                        result = await client.post('/mcp', headers={'authorization': 'Bearer ' + bearer,
+                            'accept': 'application/json, text/event-stream', 'mcp-protocol-version': '2025-03-26'},
+                            json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                                  'params': {'name': operation, 'arguments': args}})
+                        self.assertEqual(result.status_code, 200)
+                        self.assertEqual(bool(result.json()['result'].get('isError')), denied, result.json())
+                    self.assertEqual(calls, [('GET', '/api/external/v1/offices')])
 
     async def test_mf_only_two_people_isolated_and_unknown_denied(self):
         app = self.app()

@@ -45,6 +45,7 @@ class _VerifiedPlatformRequests:
             "/connections",
             "/connections/start",
             "/connections/callback",
+            "/execution/status",
         }:
             return await self.app(scope, receive, send)
         try:

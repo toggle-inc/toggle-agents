@@ -4,7 +4,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 # Explicit allowlist: never include local .deploy files, credentials or tokens.
-COPY cloud_auth_app.py authorization_host.py authorization_app.py requester_mcp.py mcp_server.py ./
+COPY cloud_auth_app.py authorization_host.py authorization_app.py requester_mcp.py mcp_server.py delivery.json ./
 COPY runtime/ ./runtime/
 COPY _foundation/ ./_foundation/
 RUN useradd --system --uid 10001 --no-create-home expense

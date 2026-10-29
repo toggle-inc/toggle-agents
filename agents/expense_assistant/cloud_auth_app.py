@@ -5,6 +5,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
+from types import SimpleNamespace
 
 from cryptography.fernet import Fernet
 from psycopg.conninfo import conninfo_to_dict
@@ -18,6 +19,7 @@ from runtime.personal_calendar import PersonalCalendar
 from runtime.personal_mf import PersonalMF
 from runtime.provider_host import ProviderHost, ProviderHostSettings
 from runtime.provider_vault import EncryptedProviderVault
+from runtime.provider_execution import ProviderExecutionResolver
 
 
 def _fields(value, required, optional=()):
@@ -154,11 +156,6 @@ class _NotConfiguredProvider:
         raise ValueError("Provider deployment is unavailable")
 
 
-def resolve_connection(person, capability):
-    """Tool grants require a separate trusted requester composition."""
-    return None
-
-
 class _CloudAuthApp:
     def __init__(self, app, settings, resources):
         self.app, self._settings, self._resources = app, settings, resources
@@ -190,6 +187,15 @@ def create_app(*, environ=None, store_factory=None):
     logging.disable(logging.CRITICAL)
     settings = settings_from_environment(environ)
     resources = []
+    execution = {}
+
+    def resolve_connection(person, capability):
+        resolver = execution.get("resolver")
+        return resolver(person, capability) if resolver is not None else None
+
+    def bind_execution(store, providers):
+        execution["resolver"] = ProviderExecutionResolver(
+            providers, store, settings.provider_namespace, tenant_id=settings.host.tenant_id)
 
     def connections(store):
         resources.append(store)
@@ -203,6 +209,7 @@ def create_app(*, environ=None, store_factory=None):
                 google_client_secret=settings.google_secret,
             ))
             resources.append(providers)
+            bind_execution(store, providers)
             return providers.connections
         vault = EncryptedProviderVault(store, settings.encryption_key, namespace=settings.provider_namespace)
         mf_adapter = PersonalMF(client_id=mf["client_id"], client_secret=settings.mf_secret,
@@ -211,6 +218,7 @@ def create_app(*, environ=None, store_factory=None):
                                     callback_uri=google["callback_uri"], vault_store=vault) if google else None
         if calendar:
             resources.append(calendar)
+        bind_execution(store, SimpleNamespace(mf=mf_adapter, calendar=calendar))
         return build_service_connections(store, mf=mf_adapter if mf or google else _NotConfiguredProvider(), calendar=calendar)
 
     try:

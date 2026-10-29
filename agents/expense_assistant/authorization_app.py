@@ -3,6 +3,7 @@
 import contextlib
 import html
 import inspect
+import json
 from urllib.parse import parse_qs, urlsplit
 
 from requester_mcp import create_app as create_mcp
@@ -159,6 +160,21 @@ def create_app(
     async def endpoint(request):
         try:
             path = request.url.path
+            if path == "/execution/status":
+                if (platform_login is None or not platform_login.allows_consent_origin(request)
+                        or request.url.query or request.headers.get("content-type", "").split(";", 1)[0] != "application/json"):
+                    raise AuthorizationError("invalid_request")
+                def unique(pairs):
+                    result = {}
+                    for key, value in pairs:
+                        if key in result:
+                            raise ValueError("Duplicate field")
+                        result[key] = value
+                    return result
+                from runtime.execution_readiness import ExecutionReadiness
+                params = json.loads(await request.body(), object_pairs_hook=unique)
+                return JSONResponse(ExecutionReadiness(authority, resolve).view(request, params),
+                                    headers={"cache-control": "no-store"})
             if path in {"/connections", "/connections/start", "/connections/callback"}:
                 person = authority._login(request)
                 if service_connections is None:
@@ -404,6 +420,7 @@ def create_app(
             ("/connections", ["GET"]),
             ("/connections/start", ["POST"]),
             ("/connections/callback", ["GET", "POST"]),
+            ("/execution/status", ["POST"]),
         )
     ]
     if login_adapter is not None:

@@ -5,6 +5,7 @@
 !requester_mcp.py
 !mcp_server.py
 !requirements.txt
+!delivery.json
 !Dockerfile.auth
 !runtime/
 !runtime/**
