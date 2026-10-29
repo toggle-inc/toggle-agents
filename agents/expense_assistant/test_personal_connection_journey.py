@@ -115,6 +115,28 @@ class PersonalConnectionJourneyTests(unittest.IsolatedAsyncioTestCase):
         replay = await self.client.get(callback, headers=self.signed("GET", callback, person=person))
         self.assertEqual(replay.status_code, 400)
 
+    async def test_unconnected_intake_view_proposes_gui_without_starting_provider_or_business_calls(self):
+        # A platform may read this typed state before executing a work request.
+        # It must not infer a provider outage to mean missing human consent.
+        for person in ("alice", "bob"):
+            view = await self.client.get("/connections", headers={
+                **self.signed("GET", "/connections", person=person), "accept": "application/json",
+            })
+            self.assertEqual(view.status_code, 200)
+            self.assertEqual({row["id"]: row["status"] for row in view.json()["connections"]},
+                             {"mf": "not_connected", "calendar": "unavailable"})
+            html = await self.client.get("/connections", headers=self.signed("GET", "/connections", person=person))
+            self.assertIn("マネーフォワード経費に接続する", html.text)
+            self.assertNotIn("Googleカレンダーに接続する</button>", html.text)
+            self.assertIn("再認証やキー入力は不要", html.text)
+            with self.vault.transaction(Requester("synthetic-tenant", person, self.now + 3000).owner, "mf") as data:
+                self.assertNotIn("oauth", data)
+                self.assertNotIn("pending", data)
+        path = "/connections?person_id=bob"
+        self.assertEqual((await self.client.get(path, headers=self.signed("GET", path))).status_code, 400)
+        self.assertEqual((await self.client.get("/connections")).status_code, 401)
+        self.assertEqual(self.provider_calls, [])
+
     @platform_fixture.with_platform_server
     async def test_two_people_gui_connect_refresh_and_mcp_keep_credentials_separate(self):
         for name in ("alice", "bob"):

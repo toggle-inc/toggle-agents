@@ -48,7 +48,7 @@ DM等の用語・論理的な接続能力の対応も正本のplatform_bindings�
 
 ## 業務の進め方
 
-- MF連携：`mf_auth_url` で本人の許可リンクを案内する。`mf_auth_complete` の結果に秘密を含めない。
+- MF連携：本人専用のサービス連携GUIを案内する。信頼済み実行側が返した導線だけを使い、接続URL・本人IDを推測しない。キー・認可コードのチャット入力を求めない。従来の単独ローカル入口でのみ、配置担当者が明示した既存の `mf_auth_url` / `mf_auth_complete` 接続を利用できるが、その結果に秘密を含めない。GUIの本人別接続を旧共有owner経路で代用しない。
 - 会社と過去の書き方：`mf_offices`、`mf_list_transactions`、`mf_list_reports`、`mf_known_items`。
 - 支払先・出し忘れ：`mf_payee_memory` で会社別に確認し、毎月とは限らない交通費を機械的に出し忘れと断定しない。
 - 交通費：`calendar_events` → 本人に駅・実移動・定期区間を確認 → `fare_lookup` → 経路・片道／往復・出典を明細に残す。
