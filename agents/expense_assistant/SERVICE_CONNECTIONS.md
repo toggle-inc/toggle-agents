@@ -11,6 +11,8 @@ EngineやSAのコードをimportせず、エージェントフォルダだけで
 - `POST /connections/start` は `provider` と `csrf_token` だけを受け取る。
   本人ID・秘密・任意の遷移先は受け取らない。フォームは本人・5分・一度限りに束縛する。
 - `not_connected` / `expired` のときだけ接続ボタンを表示する。
+  配置アダプターがない `not_configured` は「設定未完了」と表示し、管理者の設定を案内する。
+  接続ボタン・再認証・復旧待ちの案内は出さない。
   `unavailable` はサービス障害として表示し、再認証を開始しない。
 - statusとbeginは信頼済み配置アダプターが、検証済み本人から毎回解決する。
   モデルの「未接続」という回答を接続状態の根拠にしない。他人・管理者の接続を流用しない。
@@ -25,6 +27,15 @@ EngineやSAのコードをimportせず、エージェントフォルダだけで
 `create_host` へ、同じprivate storeを使う `ServiceConnections` のfactoryを渡す。
 未設定の場合は503で停止し、接続済みとは表示しない。
 実際のprovider認証URL・callback・本人別token storeはモデルではなく配置アダプターで固定する。
+
+### v1状態の拡張と反映順序
+
+`agent-service-connections/v1` と `agent-service-connection-result/v1` のstatusは
+`connected` / `not_connected` / `expired` / `not_configured` / `unavailable`。
+schema versionはv1を維持するenum拡張のため、**SA側で `not_configured` を含むsupersetを受理・表示できる変更を先に反映し、その後runtimeを反映する**。
+順序の調整はmain担当が行う。Googleアプリ設定とクラウド反映もmain担当の範囲であり、ソース変更だけで配置完了とはしない。
+設定済みproviderのstatusが `unavailable`、不正値、例外なら従来どおり `unavailable` とする。
+providerの生エラーやprivate metadataはJSON・HTMLへ出さない。
 
 ## 本人別の実プロバイダー用アダプター
 

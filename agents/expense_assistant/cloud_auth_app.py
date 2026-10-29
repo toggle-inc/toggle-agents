@@ -141,11 +141,11 @@ def settings_from_environment(environ=None):
         raise ValueError("Invalid dedicated expense auth configuration") from None
 
 
-class _UnavailableProvider:
+class _NotConfiguredProvider:
     """Explicit disabled adapter for an auth-only host with neither app configured."""
 
     def status(self, *_):
-        return "unavailable"
+        return "not_configured"
 
     def begin(self, *_):
         raise ValueError("Provider deployment is unavailable")
@@ -211,7 +211,7 @@ def create_app(*, environ=None, store_factory=None):
                                     callback_uri=google["callback_uri"], vault_store=vault) if google else None
         if calendar:
             resources.append(calendar)
-        return build_service_connections(store, mf=mf_adapter if mf or google else _UnavailableProvider(), calendar=calendar)
+        return build_service_connections(store, mf=mf_adapter if mf or google else _NotConfiguredProvider(), calendar=calendar)
 
     try:
         app = create_platform_host(settings.host, resolve_person=settings.resolve_person,

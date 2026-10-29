@@ -6,6 +6,7 @@ from unittest.mock import patch
 import httpx
 
 from authorization_app import create_app
+from runtime.connection_providers import build_service_connections
 from runtime.service_connections import ConnectionProvider, ServiceConnections
 import test_platform_login as platform_fixture
 from runtime.requester import Requester
@@ -91,6 +92,8 @@ class ServiceConnectionTests(platform_fixture.PlatformLoginTests):
         self.states[("alice", "mf")] = "unavailable"
         page = await self.connection_view(html=True)
         self.assertIn("一時的に利用できません", page.text)
+        self.assertIn("復旧を待ってください", page.text)
+        self.assertNotIn("設定未完了", page.text)
         self.assertNotIn("に接続する</button>", page.text)
         csrf = (await self.connection_view()).json()["csrf_token"]
         self.assertEqual((await self.start_connection(csrf)).status_code, 503)
@@ -100,6 +103,55 @@ class ServiceConnectionTests(platform_fixture.PlatformLoginTests):
         self.manager.status = broken
         page = await self.connection_view(html=True)
         self.assertNotIn("synthetic-secret", page.text)
+        self.assertIn("一時的に利用できません", page.text)
+        view = await self.connection_view()
+        self.assertEqual(view.json()["connections"][0]["status"], "unavailable")
+        self.assertNotIn("synthetic-secret", view.text)
+
+    async def test_not_configured_has_no_connect_or_recovery_prompt_and_refuses_start(self):
+        self.states[("alice", "mf")] = "not_configured"
+        page = await self.connection_view(html=True)
+        self.assertIn("設定未完了", page.text)
+        for hidden in ("<button", "<form", "再認証", "復旧", "一時的に利用できません"):
+            self.assertNotIn(hidden, page.text)
+        view = (await self.connection_view()).json()
+        self.assertEqual(view["schema_version"], "agent-service-connections/v1")
+        self.assertEqual(view["connections"][0]["status"], "not_configured")
+        self.assertEqual((await self.start_connection(view["csrf_token"])).status_code, 503)
+        self.assertEqual(self.begun, [])
+
+    async def test_unknown_status_and_private_metadata_are_not_exposed(self):
+        for private_status in ("private-provider-error", {"status": "connected", "private_metadata": "secret"}):
+            with self.subTest(status=private_status):
+                self.states[("alice", "mf")] = private_status
+                view = await self.connection_view()
+                self.assertEqual(view.json()["connections"][0]["status"], "unavailable")
+                page = await self.connection_view(html=True)
+                self.assertIn("一時的に利用できません", page.text)
+                for hidden in ("private-provider-error", "private_metadata", "secret"):
+                    self.assertNotIn(hidden, view.text)
+                    self.assertNotIn(hidden, page.text)
+
+    def test_missing_adapter_is_distinct_from_configured_provider_outage(self):
+        from unittest.mock import Mock
+
+        person = Requester("synthetic-tenant", "alice", self.now + 600)
+        for configured, missing in (("mf", "calendar"), ("calendar", "mf")):
+            adapter = Mock()
+            manager = build_service_connections(
+                self.fixture.store, **{configured: adapter}, clock=lambda: self.now,
+            )
+            for failure in (False, True):
+                with self.subTest(configured=configured, exception=failure):
+                    adapter.status.return_value = "unavailable"
+                    adapter.status.side_effect = RuntimeError("private-outage") if failure else None
+                    view = manager.view(person)
+                    self.assertEqual({row["id"]: row["status"] for row in view["connections"]},
+                                     {configured: "unavailable", missing: "not_configured"})
+                    self.assertNotIn("private-outage", str(view))
+                    with self.assertRaises(ValueError):
+                        manager.start(person, missing, view["csrf_token"])
+            adapter.begin.assert_not_called()
 
     async def test_unsigned_target_tampering_and_arbitrary_redirect_are_refused(self):
         self.assertEqual((await self.client.get("/connections")).status_code, 401)

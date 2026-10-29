@@ -139,7 +139,7 @@ class CloudAuthTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 200, response.text)
                 views[name] = response.json()
                 statuses = {row["id"]: row["status"] for row in views[name]["connections"]}
-                self.assertEqual(statuses, {"mf": "connected" if name == "alice" else "not_connected", "calendar": "unavailable"})
+                self.assertEqual(statuses, {"mf": "connected" if name == "alice" else "not_connected", "calendar": "not_configured"})
                 self.assertNotIn("alice-private-refresh", response.text)
             # Another person's CSRF nonce cannot begin a provider grant.
             body = urlencode({"provider": "mf", "csrf_token": views["alice"]["csrf_token"]}).encode()
@@ -204,7 +204,15 @@ class CloudAuthTests(unittest.IsolatedAsyncioTestCase):
                     response = await client.get("/connections", headers=self.signed("GET", "/connections"))
                     self.assertEqual(response.status_code, 200)
                     statuses = {row["id"]: row["status"] for row in response.json()["connections"]}
-                    self.assertEqual(statuses, {"mf": "not_connected" if mf else "unavailable", "calendar": "not_connected" if google else "unavailable"})
+                    self.assertEqual(statuses, {"mf": "not_connected" if mf else "not_configured", "calendar": "not_connected" if google else "not_configured"})
+                    page = await client.get("/connections", headers={
+                        **self.signed("GET", "/connections"), "accept": "text/html"})
+                    for label, configured in (("マネーフォワード経費", mf), ("Googleカレンダー", google)):
+                        self.assertEqual(label + "に接続する</button>" in page.text, configured)
+                    if not mf or not google:
+                        self.assertIn("設定未完了", page.text)
+                    self.assertNotIn("再認証", page.text)
+                    self.assertNotIn("復旧", page.text)
                 queue = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
                 messages = []
 

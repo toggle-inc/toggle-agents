@@ -32,7 +32,7 @@ class ServiceConnections:
     an LLM tool, and no legacy/shared credential fallback is permitted.
     """
 
-    STATES = frozenset({"connected", "not_connected", "expired", "unavailable"})
+    STATES = frozenset({"connected", "not_connected", "expired", "not_configured", "unavailable"})
 
     def __init__(self, store, *, providers, status, begin, complete=None, clock=time.time):
         self.store, self.status, self.begin, self.clock = store, status, begin, clock
@@ -161,7 +161,8 @@ class ServiceConnections:
         if as_json:
             return JSONResponse(view)
         states = {"connected": "接続済み", "not_connected": "未接続",
-                  "expired": "再接続が必要", "unavailable": "一時的に利用できません"}
+                  "expired": "再接続が必要", "not_configured": "設定未完了",
+                  "unavailable": "一時的に利用できません"}
         cards = []
         for connection in view["connections"]:
             label, state = html.escape(connection["label"]), connection["status"]
@@ -173,6 +174,8 @@ class ServiceConnections:
                     '<input type="hidden" name="csrf_token" value="' + view["csrf_token"] + '">'
                     '<button type="submit">' + label + "に接続する</button></form>"
                 )
+            elif state == "not_configured":
+                card += "<p>管理者によるサービス連携の設定が必要です。</p>"
             elif state == "unavailable":
                 card += "<p>接続サービスの復旧を待ってください。再認証やキー入力は不要です。</p>"
             cards.append(card + "</section>")

@@ -86,7 +86,7 @@ class PersonalConnectionJourneyTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(view.status_code, 200, view.text)
         self.assertEqual(view.json()["connections"][0]["status"], "not_connected")
-        self.assertEqual(view.json()["connections"][1]["status"], "unavailable")
+        self.assertEqual(view.json()["connections"][1]["status"], "not_configured")
         body = urlencode({"provider": "mf", "csrf_token": view.json()["csrf_token"]}).encode()
         start = await self.client.post("/connections/start", content=body, headers={
             **self.signed("POST", "/connections/start", body, person=person),
@@ -124,11 +124,13 @@ class PersonalConnectionJourneyTests(unittest.IsolatedAsyncioTestCase):
             })
             self.assertEqual(view.status_code, 200)
             self.assertEqual({row["id"]: row["status"] for row in view.json()["connections"]},
-                             {"mf": "not_connected", "calendar": "unavailable"})
+                             {"mf": "not_connected", "calendar": "not_configured"})
             html = await self.client.get("/connections", headers=self.signed("GET", "/connections", person=person))
             self.assertIn("マネーフォワード経費に接続する", html.text)
             self.assertNotIn("Googleカレンダーに接続する</button>", html.text)
-            self.assertIn("再認証やキー入力は不要", html.text)
+            self.assertIn("設定未完了", html.text)
+            self.assertNotIn("再認証", html.text)
+            self.assertNotIn("復旧", html.text)
             with self.vault.transaction(Requester("synthetic-tenant", person, self.now + 3000).owner, "mf") as data:
                 self.assertNotIn("oauth", data)
                 self.assertNotIn("pending", data)

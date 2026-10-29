@@ -55,7 +55,9 @@
 
 Mac固有のcertifiパスは配置担当者がDSN Secret作成時に上記Linuxパスへ置き換えます。アプリはDSNや鍵を自動変換しません。DSNにはlibpq `service` やUnix socketのfallbackを許可しません。root CAファイルはDockerで導入する `ca-certificates` を使います。
 
-初期構成は **MFのみ** です。`google` と `EXPENSE_GOOGLE_CLIENT_SECRET` の両方を省略してください。calendarは `unavailable` と表示され、再認証を求めません。Google追加時は `google: {"client_id": "...", "callback_uri": "https://SA-ORIGIN/api/chat/agent-service-callback?provider=calendar"}` と専用secretを追加します。片方だけ設定した不完全なprovider、provider設定なしの余分なsecretは起動エラーです。両provider省略も可能で、両方 `unavailable` になります。両方設定時は `ProviderHost`、片方のみの場合は暗号化vaultと `build_service_connections` を使います。両方なしの場合も拒否専用adapter経由で同じGUIを構成します。
+初期構成は **MFのみ** です。`google` と `EXPENSE_GOOGLE_CLIENT_SECRET` の両方を省略してください。calendarは `not_configured`（設定未完了）と表示され、接続ボタン・再認証・復旧待ちの案内は出しません。Google追加時は `google: {"client_id": "...", "callback_uri": "https://SA-ORIGIN/api/chat/agent-service-callback?provider=calendar"}` と専用secretを追加します。片方だけ設定した不完全なprovider、provider設定なしの余分なsecretは起動エラーです。両provider省略も可能で、両方 `not_configured` になります。両方設定時は `ProviderHost`、片方のみの場合は暗号化vaultと `build_service_connections` を使います。両方なしの場合も拒否専用adapter経由で同じGUIを構成します。
+
+設定済みproviderの実障害・status取得例外は `unavailable` のままです。v1 enum拡張のため、[反映順序](SERVICE_CONNECTIONS.md#v1状態の拡張と反映順序)に従いSA側のsuperset対応をruntimeより先に反映します。Googleアプリ設定・クラウド反映・順序調整はmain担当が行います。
 
 ## DBと権限
 

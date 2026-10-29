@@ -15,7 +15,7 @@ def build_service_connections(store, *, mf=None, calendar=None, clock=None):
 
     def status(person, provider):
         adapter = adapters[provider]
-        return "unavailable" if adapter is None else adapter.status(person, provider)
+        return "not_configured" if adapter is None else adapter.status(person, provider)
 
     def invoke(method, person, provider, *args):
         adapter = adapters[provider]
