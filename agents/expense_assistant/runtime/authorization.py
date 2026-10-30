@@ -31,6 +31,7 @@ CAPABILITY_LABELS = {
     "receipt:read": "本人の保存済み領収書を読む",
     "memory:read": "本人の設定・記憶・保留事項を読む",
     "memory:propose": "本人の記憶候補を作る",
+    "memory:write": "会話から必要な本人の設定・好み・保留事項を保存する（都度確認なし）",
     "contract:read": "エージェントの配送ルールを読む",
 }
 

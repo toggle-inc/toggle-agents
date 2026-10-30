@@ -362,6 +362,17 @@ class DurableStateTests(unittest.TestCase):
             self.store.fail_writes = False
             self.assertEqual(self.make().memory_entries(), [active])
 
+    def test_remember_failure_rolls_back_content_and_alias_then_retry_is_idempotent(self):
+        before = copy.deepcopy(self.store.rows)
+        self.store.fail_writes = True
+        with self.assertRaises(ExpenseError):
+            self.state.remember_fact("preference", "架空の自動保存")
+        self.assertEqual(self.store.rows, before)
+        self.store.fail_writes = False
+        saved = self.make().remember_fact("preference", "架空の自動保存")
+        self.assertEqual(self.make().remember_fact("preference", "架空の自動保存"), saved)
+        self.assertEqual(self.state.active_facts(), [saved])
+
     def test_memory_digest_is_owner_namespace_bound_even_for_same_id_and_content(self):
         item = self.state.propose_fact("preference", "架空の同じ内容")
         entry = self.state.memory_entries()[0]

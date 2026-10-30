@@ -56,6 +56,24 @@ def _memory_entry(row, scope):
     return {**entry, "digest": digest({"scope": scope, "entry": entry})}
 
 
+def _remember_identifier(values, scope):
+    # Content-derived personal ID is a durable replay fence. GUI edits keep
+    # this ID; deletion retains only the ID and cannot be undone by retry.
+    return digest({"domain": "expense-remember/v1", "scope": scope, "values": values})[:32]
+
+
+def _remember_result(row, values):
+    if (row["status"] != "active"
+            or any(row.get(key) != value for key, value in values.items())):
+        raise ExpenseError("この記憶は変更・無効化・削除されています。再保存せず記憶管理画面で確認してください。")
+    return {key: row[key] for key in ("id", "kind", "content", "status", "due_date")}
+
+
+def _memory_claim_key(values, scope):
+    # No plaintext is retained in replay metadata, including after GUI deletion.
+    return "memory_content_claim:" + _remember_identifier(values, scope)
+
+
 def _check_memory(row, expected_digest, scope, allowed_statuses):
     if (not row or row["status"] not in allowed_statuses
             or not isinstance(expected_digest, str)
@@ -406,11 +424,68 @@ class State:
     @synchronized
     def accept_fact(self, identifier):
         """Trusted human confirmation only, not an agent-callable operation."""
-        changed = self.db.execute(
-            "UPDATE facts SET status='active' WHERE id=? AND status='proposed'", (identifier,)
-        ).rowcount
-        if not changed:
-            raise ExpenseError("記憶の確認対象が見つかりません。")
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            raw = self.db.execute("SELECT kind,content,due_date FROM facts WHERE id=? AND status='proposed'",
+                                  (identifier,)).fetchone()
+            if not raw:
+                raise ExpenseError("記憶の確認対象が見つかりません。")
+            self._claim_memory(identifier, dict(zip(("kind", "content", "due_date"), raw)))
+            self.db.execute("UPDATE facts SET status='active' WHERE id=?", (identifier,))
+            self.db.execute("COMMIT")
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def _claim_memory(self, identifier, values):
+        """Called only inside the same transaction as creation/GUI mutation."""
+        key = _memory_claim_key(values, self._memory_scope)
+        self.db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (key, json.dumps(identifier)))
+
+    @synchronized
+    def remember_fact(self, kind, content, due_date=""):
+        """Current memory:write host only; independent of proposal approval.
+
+        Atomically create/replay one active fact per exact validated value tuple.
+        Never update an existing fact or revive its tombstone. Capability checks
+        belong to the authenticated service/dispatcher, not this storage layer.
+        """
+        values = _memory_values(kind, content, due_date)
+        identifier = _remember_identifier(values, self._memory_scope)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            claim = self.db.execute("SELECT value FROM settings WHERE key=?",
+                                    (_memory_claim_key(values, self._memory_scope),)).fetchone()
+            if claim:
+                identifier = json.loads(claim[0])
+            else:
+                # Adopt previously confirmed legacy IDs; never auto-approve a
+                # proposed record. New automatic saves have their own active ID.
+                prior = self.db.execute("SELECT id FROM facts WHERE kind=? AND content=? "
+                                        "AND due_date IS ? AND status IN ('active','retired','done') "
+                                        "ORDER BY created,id LIMIT 1",
+                                        (kind, content, values["due_date"])).fetchone()
+                if prior:
+                    identifier = prior[0]
+            raw = self.db.execute("SELECT id,kind,content,status,due_date FROM facts WHERE id=?",
+                                  (identifier,)).fetchone()
+            if raw:
+                row = dict(zip(("id", "kind", "content", "status", "due_date"), raw))
+            else:
+                if claim:
+                    raise ExpenseError("記憶の保存状態を確認してください。再作成はしません。")
+                row = {"id": identifier, **values, "status": "active"}
+                self.db.execute("INSERT INTO facts (id,kind,content,status,created,due_date) VALUES (?,?,?,?,?,?)",
+                                (identifier, kind, content, "active", self.clock(), values["due_date"]))
+            result = _remember_result(row, values)
+            self._claim_memory(identifier, values)
+            self.db.execute("COMMIT")
+            return result
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
 
     @synchronized
     def facts(self):
@@ -437,6 +512,9 @@ class State:
             allowed = {"proposed"} if action == "confirm" else {"active"} if action == "update" else {
                 "proposed", "active", "retired", "done"}
             _check_memory(row, expected_digest, self._memory_scope, allowed)
+            # Cover legacy random IDs and retain the old content's replay fence
+            # when an active item is edited or its plaintext is erased.
+            self._claim_memory(identifier, {key: row[key] for key in ("kind", "content", "due_date")})
             if action == "delete":
                 # Schema-compatible tombstone: no original kind/content/date or
                 # creation timestamp is retained. The NOT NULL columns are empty.
@@ -448,6 +526,7 @@ class State:
                     row["status"] = "active"
                 else:
                     row.update(values)
+                    self._claim_memory(identifier, values)
                 self.db.execute("UPDATE facts SET kind=?,content=?,status=?,due_date=? WHERE id=?",
                                 (row["kind"], row["content"], row["status"], row["due_date"], identifier))
                 result = _memory_entry(row, self._memory_scope)

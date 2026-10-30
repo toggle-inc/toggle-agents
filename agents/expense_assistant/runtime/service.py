@@ -160,6 +160,7 @@ class ExpenseService:
         receipt_ocr=None,
         receipt_drafts=None,
         receipt_company=None,
+        memory_write_enabled=False,
     ):
         if getattr(mf, "owner", None) != state.owner:
             raise ExpenseError("MF認証と状態の本人が一致しません。")
@@ -167,6 +168,7 @@ class ExpenseService:
         self.calendar, self.fares, self.receipts, self.policy = calendar, fares, receipts, policy
         self.aliases, self.references = aliases or {}, references
         self.write_enabled = write_enabled is True
+        self.memory_write_enabled = memory_write_enabled is True
         self.receipt_ocr, self.receipt_drafts = receipt_ocr, receipt_drafts
         self.receipt_company = receipt_company
         self._lock = threading.RLock()
@@ -177,6 +179,7 @@ class ExpenseService:
             "delivery_contract",
             "expense_context",
             "propose_teaching",
+            "remember_teaching",
             "read_reference",
             "mf_receipt_status",
             "mf_save_draft",
@@ -1090,6 +1093,12 @@ class ExpenseService:
 
     def propose_teaching(self, kind, content, due_date=""):
         return self.state.propose_fact(kind, content, due_date)
+
+    def remember_teaching(self, kind, content, due_date=""):
+        """Save useful personal facts under current initial memory:write consent."""
+        if not self.memory_write_enabled:
+            raise ExpenseError("会話から記憶を保存する初回の利用許可が必要です。候補作成の許可では保存できません。")
+        return {**self.state.remember_fact(kind, content, due_date), "saved": True}
 
     def read_reference(self, relative="index.md"):
         if self.references is None:

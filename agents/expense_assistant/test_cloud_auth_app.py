@@ -86,6 +86,21 @@ class CloudAuthTests(unittest.IsolatedAsyncioTestCase):
                                         (self.config["platform_issuer"], "sa-tenant", "unknown")):
             self.assertIsNone(settings.resolve_person(issuer, tenant, subject))
 
+    async def test_setup_reports_runtime_shortfall_without_minting_permissions(self):
+        app = self.app()
+        path = "/setup?client_id=sa"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=self.config["origin"]) as client:
+            response = await client.get(path, headers=self.signed("GET", path))
+        self.assertEqual(response.status_code, 200, response.text)
+        view = response.json()
+        self.assertEqual(view["schema_version"], "agent-setup/v1")
+        self.assertEqual(view["status"], "blocked")
+        self.assertIn("memory:write", view["missing_capabilities"])
+        self.assertIn("memory:write", view["missing_runtime_capabilities"])
+        self.assertIn("mf:draft", view["missing_runtime_capabilities"])
+        self.assertNotIn("mf:read", view["missing_runtime_capabilities"])
+        self.assertTrue(view["requires_company_selection"])
+
     def test_secrets_absent_from_repr_and_errors(self):
         env = self.environment()
         settings = settings_from_environment(env)

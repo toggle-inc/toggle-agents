@@ -34,6 +34,113 @@ class MemoryContract:
         row = self.proposed(**kwargs)
         return self.state.confirm_memory(row["id"], row["digest"])
 
+    def test_automatic_memory_is_independent_active_and_replayed_after_restart(self):
+        proposal = self.proposed()
+        first = self.state.remember_fact("preference", proposal["content"])
+        self.assertNotEqual(first["id"], proposal["id"])
+        self.assertEqual(first["status"], "active")
+        self.assertEqual(next(r for r in self.state.memory_entries() if r["id"] == proposal["id"])["status"], "proposed")
+        self.state.close()
+        state = self.make()
+        self.assertEqual(state.remember_fact("preference", proposal["content"]), first)
+        self.assertEqual(state.active_facts(), [first])
+
+    def test_automatic_memory_competing_connections_deduplicate_atomically(self):
+        second = self.make()
+        barrier = threading.Barrier(2)
+        def save(state):
+            barrier.wait(timeout=3)
+            return state.remember_fact("preference", "架空の自動記憶")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            jobs = [pool.submit(save, state) for state in (self.state, second)]
+            results = [job.result(timeout=5) for job in jobs]
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(self.state.active_facts(), [results[0]])
+
+    def test_automatic_memory_deleted_tombstone_blocks_replay_after_restart(self):
+        saved = self.state.remember_fact("preference", "架空の自動記憶")
+        entry = self.state.memory_entries()[0]
+        self.state.delete_memory(saved["id"], entry["digest"])
+        self.assert_erased(saved["id"], saved["content"])
+        self.state.close()
+        state = self.make()
+        with self.assertRaises(ExpenseError):
+            state.remember_fact("preference", "架空の自動記憶")
+        self.assertEqual(state.active_facts(), [])
+
+    def test_legacy_gui_confirm_then_automatic_save_adopts_random_id_without_duplicate(self):
+        for legacy_accept in (False, True):
+            content = "架空の旧確定情報" + str(legacy_accept)
+            proposed = self.proposed(content=content)
+            if legacy_accept:
+                self.state.accept_fact(proposed["id"])
+            else:
+                self.state.confirm_memory(proposed["id"], proposed["digest"])
+            remembered = self.make().remember_fact("preference", content)
+            self.assertEqual(remembered["id"], proposed["id"])
+        self.assertEqual(len(self.state.facts()), 2)
+
+    def test_legacy_propose_confirm_delete_then_remember_cannot_revive(self):
+        proposed = self.proposed(content="架空の旧GUI記憶")
+        active = self.state.confirm_memory(proposed["id"], proposed["digest"])
+        self.state.delete_memory(active["id"], active["digest"])
+        self.assert_erased(active["id"], active["content"])
+        state = self.make()
+        with self.assertRaises(ExpenseError):
+            state.remember_fact("preference", active["content"])
+        self.assertEqual(state.facts(), [])
+
+    def test_pre_alias_legacy_rows_are_adopted_and_fenced_by_gui_mutations(self):
+        old = self.active(content="架空の移行前情報")
+        # Simulate a record confirmed before content aliases existed.
+        self.clear_content_claims()
+        self.assertEqual(self.make().remember_fact("preference", old["content"])["id"], old["id"])
+        self.assertEqual(len(self.state.active_facts()), 1)
+        self.clear_content_claims()
+        edited = self.state.update_memory(old["id"], old["digest"], "preference", "架空の移行後情報")
+        with self.assertRaises(ExpenseError):
+            self.make().remember_fact("preference", old["content"])
+        self.state.delete_memory(edited["id"], edited["digest"])
+        for content in (old["content"], edited["content"]):
+            with self.assertRaises(ExpenseError):
+                self.make().remember_fact("preference", content)
+        separate = self.active(content="架空の移行前削除対象")
+        self.clear_content_claims()
+        self.state.delete_memory(separate["id"], separate["digest"])
+        with self.assertRaises(ExpenseError):
+            self.make().remember_fact("preference", separate["content"])
+        self.assertEqual(self.state.active_facts(), [])
+
+    def test_gui_update_old_alias_then_delete_new_alias_blocks_both_contents(self):
+        for auto in (False, True):
+            old, new = "架空の変更前" + str(auto), "架空の変更後" + str(auto)
+            if auto:
+                self.state.remember_fact("preference", old)
+                entry = next(r for r in self.state.memory_entries() if r["content"] == old)
+            else:
+                entry = self.active(content=old)
+            edited = self.state.update_memory(entry["id"], entry["digest"], "preference", new)
+            with self.assertRaises(ExpenseError):
+                self.make().remember_fact("preference", old)
+            self.assertEqual(self.make().remember_fact("preference", new)["id"], entry["id"])
+            self.state.delete_memory(edited["id"], edited["digest"])
+            for content in (old, new):
+                with self.assertRaises(ExpenseError):
+                    self.make().remember_fact("preference", content)
+        self.assertEqual(self.state.active_facts(), [])
+
+    def test_automatic_memory_is_person_namespace_bound_and_tuple_specific(self):
+        saved = self.state.remember_fact("preference", "架空の本人情報")
+        for other in (self.make(owner="bob"), self.make(namespace="other")):
+            self.assertEqual(other.facts(), [])
+            separate = other.remember_fact("preference", "架空の本人情報")
+            self.assertNotEqual(saved["id"], separate["id"])
+        first = self.state.remember_fact("pending", "架空の予定", "2030-01-01")
+        same = self.state.remember_fact("pending", "架空の予定", "20300101")
+        later = self.state.remember_fact("pending", "架空の予定", "2030-01-02")
+        self.assertEqual(first, same)
+        self.assertNotEqual(first["id"], later["id"])
+
     def test_propose_confirm_and_legacy_accept_compatibility(self):
         row = self.proposed()
         self.assertEqual(set(row), {"id", "kind", "content", "status", "due_date", "digest"})
@@ -195,6 +302,8 @@ class MemoryContract:
                 with self.assertRaises(ExpenseError):
                     self.state.propose_fact(kind, content, due)
                 with self.assertRaises(ExpenseError):
+                    self.state.remember_fact(kind, content, due)
+                with self.assertRaises(ExpenseError):
                     self.state.update_memory(active["id"], active["digest"], kind, content, due)
                 self.assertEqual(self.state.memory_entries(), before)
 
@@ -233,13 +342,16 @@ class MemoryContract:
 
     def test_gui_methods_are_not_model_operations(self):
         service = ExpenseService(mf=type("FakeMF", (), {"owner": self.state.owner})(), state=self.state)
-        for name in ("memory_entries", "confirm_memory", "update_memory", "delete_memory", "accept_fact"):
+        for name in ("memory_entries", "confirm_memory", "update_memory", "delete_memory", "accept_fact", "remember_fact"):
             self.assertNotIn(name, OPERATIONS)
             with self.assertRaises(ExpenseError):
                 service.call(name, {})
 
 
 class SQLiteMemoryTests(MemoryContract, unittest.TestCase):
+    def clear_content_claims(self):
+        self.state.db.execute("DELETE FROM settings WHERE key LIKE 'memory_content_claim:%'")
+
     def make(self, owner="alice", namespace="memory"):
         state = State(self.root / (owner + "-" + namespace + ".sqlite"), owner, clock=lambda: 100)
         self.addCleanup(state.close)
@@ -271,6 +383,12 @@ class SQLiteMemoryTests(MemoryContract, unittest.TestCase):
 
 
 class DurableMemoryTests(MemoryContract, unittest.TestCase):
+    def clear_content_claims(self):
+        with self.state._record() as data:
+            for key in list(data["settings"]):
+                if key.startswith("memory_content_claim:"):
+                    del data["settings"][key]
+
     def make(self, owner="alice", namespace="memory"):
         store = SQLiteAuthorizationStore(self.root / "auth.sqlite")
         self.addCleanup(store.close)

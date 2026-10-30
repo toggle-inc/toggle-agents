@@ -229,6 +229,21 @@ def create_app(
                 params = json.loads(await request.body(), object_pairs_hook=unique)
                 return JSONResponse(ExecutionReadiness(authority, resolve).view(request, params),
                                     headers={"cache-control": "no-store"})
+            if path == "/setup":
+                person = authority._login(request)
+                if service_connections is None:
+                    return JSONResponse({"error": "service_connections_unavailable"}, status_code=503)
+                params = _parameters(request.url.query)
+                if set(params) != {"client_id"}:
+                    raise AuthorizationError("invalid_request")
+                from runtime.agent_setup import AgentSetup
+
+                setup_capabilities = getattr(resolve, "setup_capabilities", None)
+                return JSONResponse(AgentSetup(
+                    authority, service_connections, clock=authority.clock,
+                    available_capabilities=(setup_capabilities()
+                        if callable(setup_capabilities) else None),
+                ).view(person, params["client_id"]))
             if path in {"/connections", "/connections/start", "/connections/callback"}:
                 person = authority._login(request)
                 if service_connections is None:
@@ -475,6 +490,7 @@ def create_app(
             ("/connections", ["GET"]),
             ("/connections/start", ["POST"]),
             ("/connections/callback", ["GET", "POST"]),
+            ("/setup", ["GET"]),
             ("/execution/status", ["POST"]),
             ("/memory", ["GET"]),
             ("/memory/decision", ["POST"]),

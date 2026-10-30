@@ -291,6 +291,14 @@ def create_app(*, environ=None, store_factory=None, history_source_factory=None,
                 **({"attachment_factory": attachment_factory} if needs_attachments else {}))}
                if business_profile_factory is not None else {}))
         resolve_connection.supported_operations = execution["resolver"].supported_operations
+        def setup_capabilities():
+            resolver = execution["resolver"]
+            capabilities = set(resolver.CAPABILITIES)
+            if resolver.profile is None or not resolver.profile.financial_writes:
+                capabilities.discard("mf:draft")
+                capabilities.discard("mf:write")
+            return frozenset(capabilities)
+        resolve_connection.setup_capabilities = setup_capabilities
         if business_profile_factory is not None:
             resolve_connection.receipt_resources = execution["resolver"].receipt_resources
 

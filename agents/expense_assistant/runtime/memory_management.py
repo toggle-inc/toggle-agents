@@ -1,7 +1,8 @@
 """Agent-owned memory management for verified humans, never model tools.
 
-The host supplies a fresh person-scoped service. Model proposals are inactive
-until the human confirms exact content through this private, CSRF-bound GUI.
+The host supplies a fresh person-scoped service. Legacy proposals remain
+inactive until confirmed here. Initial memory:write consent separately permits
+automatic active saves; this GUI also lets the person inspect, edit and delete them.
 """
 import hashlib
 import html

@@ -47,6 +47,7 @@ OPERATIONS = {
     "prepare_receipt_draft": "attachment:read",
     "expense_context": "memory:read",
     "propose_teaching": "memory:propose",
+    "remember_teaching": "memory:write",
     "read_reference": "rules:read",
     "delivery_contract": "contract:read",
 }
@@ -280,6 +281,7 @@ class RequesterDispatcher:
             or service.state.owner != person.owner
             or service.mf.owner != person.owner
             or (service.receipts is not None and service.receipts.owner != person.owner)
+            or (capability == "memory:write" and service.memory_write_enabled is not True)
         ):
             raise ExpenseError("本人専用の接続と保存先を確認できません。")
         return service
@@ -288,6 +290,7 @@ class RequesterDispatcher:
 assert set(OPERATIONS) == set(ORIGINAL_TOOLS) | {
     "expense_context",
     "propose_teaching",
+    "remember_teaching",
     "read_reference",
     "delivery_contract",
     "mf_receipt_status",

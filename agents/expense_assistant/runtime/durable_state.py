@@ -23,6 +23,7 @@ import uuid
 from cryptography.fernet import Fernet
 
 from .state import ExpenseError, OutcomeUnknownError, digest, _memory_values, _memory_entry, _check_memory
+from .state import _remember_identifier, _remember_result, _memory_claim_key
 
 
 def _json(value):
@@ -267,7 +268,36 @@ class DurableState:
             row = data["facts"].get(identifier)
             if not row or row["status"] != "proposed":
                 raise ExpenseError("記憶の確認対象が見つかりません。")
+            self._claim_memory(data, row)
             row["status"] = "active"
+
+    def _claim_memory(self, data, row):
+        values = {key: row[key] for key in ("kind", "content", "due_date")}
+        data["settings"].setdefault(_memory_claim_key(values, self._binding), row["id"])
+
+    def remember_fact(self, kind, content, due_date=""):
+        """Current memory:write host only. Atomic active creation/replay, not approval."""
+        values = _memory_values(kind, content, due_date)
+        identifier = _remember_identifier(values, self._binding)
+        with self._record() as data:
+            claim = data["settings"].get(_memory_claim_key(values, self._binding))
+            if claim is not None:
+                identifier = claim
+            else:
+                prior = next((row for row in sorted(data["facts"].values(), key=lambda r: r["id"])
+                              if row["status"] in {"active", "retired", "done"}
+                              and all(row.get(key) == value for key, value in values.items())), None)
+                if prior:
+                    identifier = prior["id"]
+            row = data["facts"].get(identifier)
+            if row is None:
+                if claim is not None:
+                    raise ExpenseError("記憶の保存状態を確認してください。再作成はしません。")
+                row = {"id": identifier, **values, "status": "active", "created": self.clock()}
+                data["facts"][identifier] = row
+            result = _remember_result(row, values)
+            self._claim_memory(data, row)
+        return result
 
     def facts(self):
         with self._record() as data:
@@ -287,6 +317,7 @@ class DurableState:
             allowed = {"proposed"} if action == "confirm" else {"active"} if action == "update" else {
                 "proposed", "active", "retired", "done"}
             _check_memory(row, expected_digest, self._binding, allowed)
+            self._claim_memory(data, row)
             if action == "delete":
                 result = {"id": identifier, "status": "deleted"}
                 data["facts"][identifier] = dict(result)
@@ -295,6 +326,7 @@ class DurableState:
                     row["status"] = "active"
                 else:
                     row.update(values)
+                    self._claim_memory(data, row)
                 result = _memory_entry(row, self._binding)
         return result
 

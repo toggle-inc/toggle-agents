@@ -45,6 +45,7 @@ class _VerifiedPlatformRequests:
             "/connections",
             "/connections/start",
             "/connections/callback",
+            "/setup",
             "/execution/status",
             "/memory",
             "/memory/decision",
@@ -66,7 +67,7 @@ class _VerifiedPlatformRequests:
                 or len(source_origin) > 1
                 or scope["method"] not in (
                     {"GET", "POST"} if scope["path"] == "/connections/callback"
-                    else {"GET"} if scope["path"] in {"/oauth/authorize", "/connections", "/memory"}
+                    else {"GET"} if scope["path"] in {"/oauth/authorize", "/connections", "/memory", "/setup"}
                     else {"POST"}
                 )
                 or (scope["method"] == "POST" and scope.get("query_string", b""))

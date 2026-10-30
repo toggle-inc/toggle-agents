@@ -53,6 +53,9 @@ class RequesterMCPTests(unittest.IsolatedAsyncioTestCase):
                 state=State(root / "state.sqlite", person.owner),
                 receipts=Receipts(root / "receipts", None, person.owner),
                 calendar=SyntheticCalendar(name),
+                # This fixture grants every OPERATIONS capability, including
+                # the new independent memory:write permission.
+                memory_write_enabled=True,
             )
             self.addCleanup(service.state.close)
             self.grants[name] = ConnectionGrant(

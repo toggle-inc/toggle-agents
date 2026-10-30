@@ -50,6 +50,29 @@ class ServiceConnectionTests(platform_fixture.PlatformLoginTests):
             "content-type": "application/x-www-form-urlencoded",
         })
 
+    async def test_setup_requires_signed_owner_and_registered_client(self):
+        path = "/setup?client_id=sa"
+        self.assertEqual((await self.client.get(path)).status_code, 401)
+        response = await self.client.get(path, headers=self.signed("GET", path))
+        self.assertEqual(response.status_code, 200, response.text)
+        view = response.json()
+        self.assertEqual(view["schema_version"], "agent-setup/v1")
+        self.assertEqual(view["status"], "blocked")
+        self.assertTrue(view["missing_runtime_capabilities"])
+        self.assertIn("no-store", response.headers["cache-control"])
+        self.assertNotIn("person_id", view)
+        self.assertEqual(self.begun, [])
+        for bad in ("/setup", "/setup?client_id=missing", "/setup?client_id=sa&owner=bob"):
+            reply = await self.client.get(bad, headers=self.signed("GET", bad))
+            self.assertEqual(reply.status_code, 400, reply.text)
+
+    async def test_setup_signature_binds_exact_client_query(self):
+        response = await self.client.get(
+            "/setup?client_id=sa", headers=self.signed("GET", "/setup?client_id=other"),
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.begun, [])
+
     async def test_signed_gui_has_connect_button_and_no_key_fields(self):
         page = await self.connection_view(html=True)
         self.assertEqual(page.status_code, 200)

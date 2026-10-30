@@ -11,7 +11,7 @@ from .service import ExpenseService
 from .state import ExpenseError
 
 CAPABILITIES = frozenset({"mf:read", "mf:draft", "mf:write", "calendar:read", "contract:read",
-                          "memory:read", "memory:propose", "receipt:read", "attachment:read",
+                          "memory:read", "memory:propose", "memory:write", "receipt:read", "attachment:read",
                           "fare:read", "rules:read"})
 
 
@@ -74,6 +74,7 @@ class DurableExecutionProfile:
             "mf:write": {"mf_create_transaction", "mf_upload_receipt", "mf_update_transaction", "mf_delete_transaction"},
             "calendar:read": {"calendar_events"}, "contract:read": {"delivery_contract"},
             "memory:read": {"expense_context"}, "memory:propose": {"propose_teaching"},
+            "memory:write": {"remember_teaching"},
             "attachment:read": {"fetch_attachment"}, "fare:read": {"fare_lookup"},
             "rules:read": {"check_rules"},
         }
@@ -113,5 +114,7 @@ class DurableExecutionProfile:
             fares=self.fares_factory(person) if capability == "fare:read" and self.fares_factory is not None else None,
             references=self.references_factory(person) if capability == "rules:read" and self.references_factory is not None else None,
             write_enabled=(not consent_only and self.financial_writes and capability in {"mf:draft", "mf:write"}),
+            memory_write_enabled=(not consent_only and capability == "memory:write"
+                                  and "memory:write" in self.capabilities),
             **draft_options,
         )

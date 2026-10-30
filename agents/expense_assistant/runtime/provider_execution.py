@@ -126,7 +126,8 @@ class ProviderExecutionResolver:
         This does not issue MCP grants or bind MF/calendar credentials.
         """
         if (self.profile is None
-                or not {'memory:read', 'memory:propose'} <= self.profile.capabilities
+                or 'memory:read' not in self.profile.capabilities
+                or not self.profile.capabilities & {'memory:propose', 'memory:write'}
                 or not isinstance(person, Requester) or person.kind != 'human'
                 or not _valid_id(person.tenant_id) or not _valid_id(person.person_id)
                 or (self.tenant_id is not None and person.tenant_id != self.tenant_id)
@@ -187,8 +188,10 @@ class ProviderExecutionResolver:
                 **({"capability": capability} if durable else {}),
             )
             expected_write = self.profile is not None and capability in {"mf:draft", "mf:write"}
+            expected_memory_write = durable and capability == "memory:write"
             if (
                 not isinstance(service, ExpenseService) or service.write_enabled is not expected_write
+                or service.memory_write_enabled is not expected_memory_write
                 or service.state.owner != person.owner or service.mf.owner != person.owner
                 or (service.calendar is not None and service.calendar.owner != person.owner)
                 or (service.receipts is not None and service.receipts.owner != person.owner)
