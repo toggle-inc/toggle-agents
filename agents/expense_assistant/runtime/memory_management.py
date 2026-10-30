@@ -43,16 +43,22 @@ class MemoryManagement:
         if cursor is not None and (not isinstance(cursor, str) or not re.fullmatch(r'[a-f0-9]{32}', cursor)):
             raise MemoryRequestError('記憶のページを確認してください。')
         rows = sorted(state.memory_entries(), key=lambda row: row['id'])
+        if self.clock() >= person.expires_at:
+            raise ExpenseError('本人のログイン期限を確認して画面を開き直してください。')
         if cursor is not None:
             rows = [row for row in rows if row['id'] > cursor]
         entries = rows[:200]
         next_cursor = entries[-1]['id'] if len(rows) > 200 else None
         token = secrets.token_urlsafe(32)
-        expires = min(person.expires_at, self.clock() + 300)
+        expires = math.floor(min(person.expires_at, self.clock() + 300))
+        if self.clock() >= expires:
+            raise ExpenseError('本人のログイン期限を確認して画面を開き直してください。')
         with self.store.transaction() as records:
             records.put('memory-gui:' + hashlib.sha256(token.encode()).hexdigest(), {
                 'owner': person.owner, 'expires_at': expires, 'used': False,
                 'entries': {row['id']: row['digest'] for row in entries}})
+        if self.clock() >= expires:
+            raise ExpenseError('本人のログイン期限を確認して画面を開き直してください。')
         return {'schema_version': 'agent-personal-memory/v1', 'agent_slug': 'expense_assistant',
                 'csrf_token': token, 'expires_at': expires, 'entries': entries, 'next_cursor': next_cursor}
 

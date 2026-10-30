@@ -3,6 +3,7 @@ from dataclasses import replace
 import json
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 import httpx
@@ -120,6 +121,28 @@ class MemoryManagementTests(unittest.TestCase):
         self.assertIsNone(self.manager.view(alice)['next_cursor'])
         self.assertEqual(self.manager.view(alice,cursor='f'*32)['entries'],[])
         with self.assertRaises(MemoryRequestError): self.manager.view(alice,cursor='invalid')
+
+    def test_expiry_during_state_read_prevents_disclosure(self):
+        self.proposal()
+        alice=replace(self.people['alice'],expires_at=self.now+1)
+        service=self.service(alice)
+        read=service.state.memory_entries
+        def delayed():
+            rows=read()
+            self.now+=2
+            return rows
+        with patch.object(service.state,'memory_entries',side_effect=delayed):
+            manager=MemoryManagement(self.store,lambda _:service,clock=lambda:self.now)
+            with self.assertRaises(ExpenseError): manager.view(alice)
+
+    def test_gui_expiry_is_integral_even_with_fractional_host_time(self):
+        self.now=1000.25
+        alice=replace(self.people['alice'],expires_at=1100.75)
+        view=self.manager.view(alice)
+        self.assertIs(type(view['expires_at']),int)
+        self.assertEqual(view['expires_at'],1100)
+        near=replace(alice,expires_at=1000.75)
+        with self.assertRaises(ExpenseError): self.manager.view(near)
 
 
 class MemoryRouteTests(unittest.IsolatedAsyncioTestCase):
