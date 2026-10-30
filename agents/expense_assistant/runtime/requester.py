@@ -44,6 +44,7 @@ OPERATIONS = {
     "fare_lookup": "fare:read",
     "check_rules": "rules:read",
     "fetch_attachment": "attachment:read",
+    "prepare_receipt_draft": "attachment:read",
     "expense_context": "memory:read",
     "propose_teaching": "memory:propose",
     "read_reference": "rules:read",
@@ -291,4 +292,5 @@ assert set(OPERATIONS) == set(ORIGINAL_TOOLS) | {
     "delivery_contract",
     "mf_receipt_status",
     "mf_save_draft",
+    "prepare_receipt_draft",
 }

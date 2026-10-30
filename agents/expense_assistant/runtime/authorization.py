@@ -27,7 +27,7 @@ CAPABILITY_LABELS = {
     "calendar:read": "本人のカレンダーを読む",
     "fare:read": "交通運賃を調べる",
     "rules:read": "許可済みの社内規則・資料を読む",
-    "attachment:read": "本人が許可した添付を取得する",
+    "attachment:read": "本人の添付画像を取得・文字認識し、本人専用の領収書・経費下書きを保存する（MF未登録）",
     "receipt:read": "本人の保存済み領収書を読む",
     "memory:read": "本人の設定・記憶・保留事項を読む",
     "memory:propose": "本人の記憶候補を作る",

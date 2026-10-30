@@ -223,13 +223,16 @@ def create_app(*, environ=None, store_factory=None, history_source_factory=None,
     if business_profile_factory is not None and not callable(business_profile_factory):
         raise ValueError("Explicit business profile factory required")
     real_source = settings.history.source_read if settings.history is not None else None
+    history_env = os.environ if environ is None else environ
+    needs_attachments = getattr(business_profile_factory, "requires_source_attachments", False)
+    if needs_attachments and real_source is None:
+        raise ValueError("Receipt preparation requires configured verified source history")
     if settings.history is not None and history_source_factory is not None and not callable(history_source_factory):
         raise ValueError("Enabled cloud history requires an explicit source adapter")
     if settings.history is not None and history_source_factory is None:
         if real_source is None:
             raise ValueError("Enabled cloud history requires an explicit source adapter")
         from runtime.sa_history_client import SAHistoryClient, validate_source_read_key
-        history_env = os.environ if environ is None else environ
         validate_source_read_key(history_env.get(real_source.signing_key_env, ""))
     resources = []
     if settings.history is not None and history_source_factory is None:
@@ -244,6 +247,25 @@ def create_app(*, environ=None, store_factory=None, history_source_factory=None,
             resources.append(client)
             return client, client.resolve_source
     execution = {}
+    attachment_clients = {}
+
+    def attachment_factory(person):
+        from runtime.sa_attachment_client import SAAttachmentClient
+        resolver = execution.get("history_resolver")
+        binding = resolver.current() if resolver is not None else None
+        if binding is None or not binding.matches(person):
+            raise ValueError("Verified current source required for personal attachments")
+        if person.owner not in attachment_clients:
+            client = SAAttachmentClient(
+                origin=real_source.origin, agent_origin=settings.host.origin,
+                source_namespace=real_source.source_namespace, source_actor=real_source.source_actor,
+                target=real_source.target, kid=real_source.kid, owner=person.owner,
+                signing_private_key=history_env.get(real_source.signing_key_env, ""),
+                resolve_binding=resolver.current,
+            )
+            attachment_clients[person.owner] = client
+            resources.append(client)
+        return attachment_clients[person.owner]
 
     def resolve_connection(person, capability):
         resolver = execution.get("resolver")
@@ -265,7 +287,9 @@ def create_app(*, environ=None, store_factory=None, history_source_factory=None,
     def bind_execution(store, providers):
         execution["resolver"] = ProviderExecutionResolver(
             providers, store, settings.provider_namespace, tenant_id=settings.host.tenant_id,
-            **({"profile": business_profile_factory(settings, store)} if business_profile_factory is not None else {}))
+            **({"profile": business_profile_factory(settings, store,
+                **({"attachment_factory": attachment_factory} if needs_attachments else {}))}
+               if business_profile_factory is not None else {}))
         resolve_connection.supported_operations = execution["resolver"].supported_operations
         if business_profile_factory is not None:
             resolve_connection.receipt_resources = execution["resolver"].receipt_resources
@@ -306,7 +330,9 @@ def create_app(*, environ=None, store_factory=None, history_source_factory=None,
     if settings.history is not None:
         from runtime.cloud_history_config import build_cloud_history
         def history_factory(store):
-            return build_cloud_history(settings.history, store, history_source_factory)
+            pair = build_cloud_history(settings.history, store, history_source_factory)
+            execution["history_resolver"] = pair[1]
+            return pair
         history_options["history_factory"] = history_factory
         history_options["history_boundary_migration"] = settings.history.boundary_migration
 

@@ -76,6 +76,16 @@ class RequestAuthorization:
         if scope["type"] != "http":
             await send({"type": "websocket.close", "code": 1008})
             return
+        if self.history_runtime is not None:
+            from runtime.external_history_resolver import ExternalHistoryResolver
+            if isinstance(self.history_resolver, ExternalHistoryResolver):
+                # Do not inherit a parent's capability while authenticating a
+                # nested/copied request, including its failure response.
+                with self.history_resolver.binding_context.unbound():
+                    return await self._authorized_http(scope, receive, send)
+        return await self._authorized_http(scope, receive, send)
+
+    async def _authorized_http(self, scope, receive, send):
         values = [v for k, v in scope.get("headers", ()) if k.lower() == b"authorization"]
         history_scope = ExitStack()
         try:
@@ -88,12 +98,17 @@ class RequestAuthorization:
             person = self.dispatcher.validate_request(token)
             if self.history_runtime is not None:
                 from runtime.history_request import HistoryRequestBinding
+                from runtime.external_history_resolver import ExternalHistoryResolver
                 try:
                     verified_scope, receive = await self._history_request(scope, receive)
                     binding = self.history_resolver(verified_scope, person)
                     if not isinstance(binding, HistoryRequestBinding) or not binding.matches(person):
                         raise ExpenseError("Invalid history binding")
                     history_scope.enter_context(self.history_runtime.bind(binding.invocation))
+                    if isinstance(self.history_resolver, ExternalHistoryResolver):
+                        history_scope.enter_context(
+                            self.history_resolver.binding_context.bind(binding, person)
+                        )
                 except Exception:
                     raise ExpenseError("Invalid history binding") from None
         except ExpenseError:
@@ -111,6 +126,9 @@ class RequestAuthorization:
             )
             await send({"type": "http.response.body", "body": b"Unauthorized"})
             return
+        except BaseException:
+            history_scope.close()
+            raise
         handle = self.context.set(token)
 
         async def private_send(message):
@@ -189,6 +207,12 @@ class _HistoryBoundaryMigration:
             for key, _ in scope.get("headers", ())
         )
         boundary = self.strict if strict else self.legacy
+        if not strict:
+            from runtime.external_history_resolver import ExternalHistoryResolver
+            resolver = self.strict.history_resolver
+            if isinstance(resolver, ExternalHistoryResolver):
+                with resolver.binding_context.unbound():
+                    return await boundary(scope, receive, send)
         return await boundary(scope, receive, send)
 
 

@@ -157,6 +157,9 @@ class ExpenseService:
         aliases=None,
         references=None,
         write_enabled=False,
+        receipt_ocr=None,
+        receipt_drafts=None,
+        receipt_company=None,
     ):
         if getattr(mf, "owner", None) != state.owner:
             raise ExpenseError("MF認証と状態の本人が一致しません。")
@@ -164,6 +167,8 @@ class ExpenseService:
         self.calendar, self.fares, self.receipts, self.policy = calendar, fares, receipts, policy
         self.aliases, self.references = aliases or {}, references
         self.write_enabled = write_enabled is True
+        self.receipt_ocr, self.receipt_drafts = receipt_ocr, receipt_drafts
+        self.receipt_company = receipt_company
         self._lock = threading.RLock()
         self._draft_guard = ContextVar("expense_draft_consent", default=None)
 
@@ -175,6 +180,7 @@ class ExpenseService:
             "read_reference",
             "mf_receipt_status",
             "mf_save_draft",
+            "prepare_receipt_draft",
         )
         if operation not in operations or not isinstance(arguments, dict):
             raise ExpenseError("未対応の経費操作です。")
@@ -465,6 +471,37 @@ class ExpenseService:
 
     def fetch_attachment(self, url):
         return self._require(self.receipts, "添付ファイル").fetch_attachment(url)
+
+    def prepare_receipt_draft(self, attachment_id=""):
+        """Read the verified source image and prepare a local, unsubmitted draft.
+
+        Company rules come from trusted agent configuration, never tool text.
+        This operation never calls an MF write or uploads an image to MF.
+        """
+        files = self._require(self.receipts, "添付ファイル")
+        reader = self._require(self.receipt_ocr, "画像の文字認識")
+        builder = self._require(self.receipt_drafts, "会社別の経費ルール")
+        if not self.receipt_company or files.fetcher is None:
+            raise ExpenseError("本人に適用する会社・添付接続を確認してください。")
+        manifest = files.fetcher.manifest()
+        items = manifest["attachments"]
+        if not attachment_id:
+            if len(items) != 1:
+                raise ExpenseError("領収書を1枚添付するか、対象の添付IDを指定してください。")
+            attachment_id = items[0]["id"]
+        if not isinstance(attachment_id, str) or not any(v["id"] == attachment_id for v in items):
+            raise ExpenseError("この依頼に添付された領収書を指定してください。")
+        receipt = files.fetch_attachment("attachment:" + attachment_id)
+        payload = files.payload(receipt["path"])
+        extracted = reader.read(base64.b64decode(payload["content"], validate=True), payload["content_type"])
+        draft = builder.build(extracted, receipt["path"], self.receipt_company)
+        # Recheck the current source/ACL after OCR, not merely before reading.
+        current = files.fetcher.manifest()
+        stable = ("schemaVersion", "invocationId", "sourceMessageId", "attachments", "manifestSha256")
+        if any(current.get(k) != manifest.get(k) for k in stable):
+            raise ExpenseError("添付の権限または内容が変わりました。再確認してください。")
+        preview = self.state.preview("receipt_draft", self.receipt_company, draft)
+        return {**draft, **preview, "mf_registered": False, "submitted": False}
 
     def mf_get_receipt(self, office, transaction_id):
         company = self._office(office)

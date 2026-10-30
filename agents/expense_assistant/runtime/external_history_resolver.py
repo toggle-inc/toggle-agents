@@ -16,7 +16,7 @@ from _foundation.execution_binding import (
     ExecutionBindingError, ExecutionRequest, ExternalExecutionVerifier, VerifiedSourceCall,
 )
 from _foundation.platform_identity import PlatformPerson, _identifier
-from .history_request import HistoryRequestBinding
+from .history_request import HistoryRequestBinding, HistoryRequestContext
 from .requester import Requester
 
 
@@ -72,6 +72,11 @@ class ExternalHistoryResolver:
             raise ValueError("Explicit external history verifier and source adapter required")
         self.verifier, self.resolve_source = verifier, resolve_source
         self.agent_slug, self.source_platform = agent_slug, source_platform
+        self.binding_context = HistoryRequestContext(clock=verifier.clock)
+
+    def current(self):
+        """Trusted attachment-client accessor; resolution alone never binds."""
+        return self.binding_context.current()
 
     def __call__(self, scope, person):
         try:

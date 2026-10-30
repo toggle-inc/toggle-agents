@@ -13,6 +13,11 @@ from runtime.service import ORIGINAL_TOOLS
 from runtime.state import ExpenseError
 
 DESCRIPTIONS = {
+    "prepare_receipt_draft": (
+        "この依頼の添付画像本体を取得し、実OCRとエージェント管理の会社ルールから経費下書きを作る。"
+        "添付が1枚なら引数不要。利用者に規則の貼付けを要求しない。読めない項目のみ確認する。"
+        "MFには未登録、提出しない。税・登録番号は画像の記載を抽出し実在性は未確認。"
+    ),
     "mf_save_draft": (
         "内部候補preview_idからMF未申請明細を保存しMF確認リンクを返す。"
         "初回の本人・会社別許可が必要。毎回の独自確認画面は不要。既存修正・削除・提出は不可。"
@@ -64,6 +69,7 @@ def create_server(service, *, receipt_reader=None, conversation_reader=None,
     expense_tools = ORIGINAL_TOOLS + (
         "delivery_contract", "expense_context", "propose_teaching",
         "read_reference", "mf_receipt_status", "mf_save_draft",
+        "prepare_receipt_draft",
     )
 
     class CatalogServer(MCPServer):

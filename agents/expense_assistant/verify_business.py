@@ -23,7 +23,7 @@ def main():
         parser.error("Write JSON reports outside source files, or under this agent's .deploy folder")
     modules = ("test_durable_business", "test_durable_state", "test_business_profile_config",
                "test_execution_readiness", "test_operation_readiness_http", "test_receipt_workflow",
-               "test_drafts", "test_expense_preview", "test_runtime")
+               "test_drafts", "test_expense_preview", "test_runtime", "test_synthetic_expense_scenario")
     suite = unittest.TestLoader().loadTestsFromNames(modules)
     stream = io.StringIO()
     result = unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
@@ -32,7 +32,7 @@ def main():
               "passed": result.wasSuccessful() and result.testsRun > 0,
               "tests": result.testsRun, "failures": len(result.failures), "errors": len(result.errors),
               "skipped": len(result.skipped), "modules": modules,
-              "unverified": ["実画像OCR/視覚入力", "実SA添付の新署名経路", "実MF保存・OCR読戻し",
+              "unverified": ["実画像OCR/視覚入力", "税率・税額の専用項目と照合（未対応）", "実SA添付の新署名経路", "実MF保存・OCR読戻し",
                              "実会社規則・運賃・個人カレンダー", "公開版と本人専用DMの一連動作"],
               "test_output": stream.getvalue()}
     args.report.parent.mkdir(parents=True, exist_ok=True)

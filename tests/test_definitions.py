@@ -91,7 +91,9 @@ class DefinitionTests(unittest.TestCase):
         for path in source_files():
             for pattern in patterns:
                 with self.subTest(file=str(path.relative_to(ROOT)), pattern=pattern):
-                    self.assertIsNone(re.search(pattern, path.read_text(encoding="utf-8")))
+                    # Binary fixtures are scanned too: preserve ASCII secret
+                    # markers instead of skipping images or failing to decode.
+                    self.assertIsNone(re.search(pattern, path.read_bytes().decode("utf-8", errors="backslashreplace")))
 
 
 if __name__ == "__main__":

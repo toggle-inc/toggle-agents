@@ -28,8 +28,9 @@ def prepare_business_profile(value, *, environ, allowed_people):
     if isinstance(value, dict) and set(value) == {"enabled"} and value["enabled"] is False:
         return None
     try:
-        if (not isinstance(value, dict) or set(value) != {
-                "enabled", "namespace", "capabilities", "financial_writes", "policies"}
+        required = {"enabled", "namespace", "capabilities", "financial_writes", "policies"}
+        if (not isinstance(value, dict) or not required <= set(value)
+                or set(value) - required - {"receipt_drafts"}
                 or value["enabled"] is not True or type(value["financial_writes"]) is not bool
                 or not isinstance(value["namespace"], str) or not 1 <= len(value["namespace"]) <= 512
                 or value["namespace"] != value["namespace"].strip()
@@ -39,10 +40,16 @@ def prepare_business_profile(value, *, environ, allowed_people):
             raise ValueError
         capabilities = frozenset(value["capabilities"])
         namespace, financial_writes = value["namespace"], value["financial_writes"]
-        if not capabilities <= CAPABILITIES or "attachment:read" in capabilities:
+        if not capabilities <= CAPABILITIES or ("attachment:read" in capabilities and "receipt_drafts" not in value):
             # Attachment import requires a request-bound, trusted source adapter.
             # Do not turn a static URL allowlist into private source authority.
             raise ValueError
+        draft_factory = None
+        if "receipt_drafts" in value:
+            if "attachment:read" not in capabilities:
+                raise ValueError
+            from .receipt_draft_config import prepare_receipt_drafts
+            draft_factory = prepare_receipt_drafts(value["receipt_drafts"], allowed_people=allowed_people)
         key = environ.get(BUSINESS_KEY_ENV, "").encode("ascii")
         Fernet(key)
         provider_key = environ.get("EXPENSE_PROVIDER_ENCRYPTION_KEY", "").encode("ascii")
@@ -83,17 +90,21 @@ def prepare_business_profile(value, *, environ, allowed_people):
             instance.office_ids = policy["office_ids"]
             return instance
 
-        def factory(settings, store):
+        def factory(settings, store, *, attachment_factory=None):
+            if draft_factory is not None and not callable(attachment_factory):
+                raise ValueError("Verified request-local source attachment adapter required")
             return DurableExecutionProfile(store, key, namespace, capabilities=capabilities,
                 financial_writes=financial_writes, policy_factory=policy_factory if needs_policy else None,
                 office_scope_factory=(lambda person: policies.get(person.person_id, {}).get("office_ids", ())) if needs_policy else None,
-                fares_factory=(lambda _: Fares(SafeFetch(("transit.yahoo.co.jp",)))) if "fare:read" in capabilities else None)
+                fares_factory=(lambda _: Fares(SafeFetch(("transit.yahoo.co.jp",)))) if "fare:read" in capabilities else None,
+                fetcher_factory=attachment_factory, receipt_draft_factory=draft_factory)
 
         # Validate capability/composition requirements without opening a store.
         class ValidationStore:
             def transaction(self):
                 raise AssertionError("configuration must not access the store")
-        factory(None, ValidationStore())
+        factory(None, ValidationStore(), **({"attachment_factory": lambda _: None} if draft_factory else {}))
+        factory.requires_source_attachments = draft_factory is not None
         return factory
     except Exception:
         raise ValueError("Invalid explicit business profile configuration") from None

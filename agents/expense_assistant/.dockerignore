@@ -11,6 +11,8 @@
 !runtime/**
 !_foundation/
 !_foundation/**
+!fixtures/
+!fixtures/synthetic_company_rules.json
 **/__pycache__
 **/__pycache__/**
 **/*.pyc

@@ -36,12 +36,14 @@ class _PersonalMFView:
 class DurableExecutionProfile:
     def __init__(self, store, encryption_key, namespace, *, capabilities,
                  financial_writes=False, policy_factory=None, fetcher_factory=None,
-                 fares_factory=None, references_factory=None, office_scope_factory=None):
+                 fares_factory=None, references_factory=None, office_scope_factory=None,
+                 receipt_draft_factory=None):
         if (not isinstance(capabilities, frozenset) or not capabilities <= CAPABILITIES
                 or type(financial_writes) is not bool or not isinstance(namespace, str)
                 or not namespace.strip() or not callable(getattr(store, "transaction", None))
                 or any(v is not None and not callable(v) for v in (
-                    policy_factory, fetcher_factory, fares_factory, references_factory, office_scope_factory))):
+                    policy_factory, fetcher_factory, fares_factory, references_factory, office_scope_factory,
+                    receipt_draft_factory))):
             raise ValueError("Explicit durable business profile required")
         from cryptography.fernet import Fernet
         Fernet(encryption_key)
@@ -58,6 +60,9 @@ class DurableExecutionProfile:
         self.policy_factory, self.fetcher_factory = policy_factory, fetcher_factory
         self.fares_factory, self.references_factory = fares_factory, references_factory
         self.office_scope_factory = office_scope_factory
+        self.receipt_draft_factory = receipt_draft_factory
+        if receipt_draft_factory is not None and "attachment:read" not in capabilities:
+            raise ValueError("Receipt drafting requires authorized source attachment access")
 
     @property
     def supported_operations(self):
@@ -76,6 +81,8 @@ class DurableExecutionProfile:
             operations |= groups.get(capability, set())
         if "rules:read" in self.capabilities and self.references_factory is not None:
             operations.add("read_reference")
+        if self.receipt_draft_factory is not None:
+            operations.add("prepare_receipt_draft")
         return frozenset(operations)
 
     def service(self, *, person, mf, calendar, clock, capability, consent_only=False):
@@ -94,10 +101,17 @@ class DurableExecutionProfile:
         policy = self.policy_factory(person) if capability in {"mf:draft", "mf:write", "rules:read"} and self.policy_factory is not None else None
         state = DurableState(self.store, self._key, person.owner, self.namespace, clock)
         receipts = DurableReceipts(self.store, self._key, person.owner, self.namespace, fetcher)
+        draft_options = {}
+        if capability == "attachment:read" and self.receipt_draft_factory is not None:
+            from .receipt_ocr import ReceiptOCR
+            builder, company_key = self.receipt_draft_factory(person)
+            draft_options = {"receipt_ocr": ReceiptOCR(), "receipt_drafts": builder,
+                             "receipt_company": company_key}
         return ExpenseService(
             mf=_PersonalMFView(person.owner, mf, capability if not consent_only else "mf:read"),
             state=state, receipts=receipts, calendar=calendar, policy=policy,
             fares=self.fares_factory(person) if capability == "fare:read" and self.fares_factory is not None else None,
             references=self.references_factory(person) if capability == "rules:read" and self.references_factory is not None else None,
             write_enabled=(not consent_only and self.financial_writes and capability in {"mf:draft", "mf:write"}),
+            **draft_options,
         )
