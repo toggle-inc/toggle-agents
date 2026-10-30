@@ -160,6 +160,53 @@ class ReceiptMFCandidateTests(unittest.TestCase):
         del self.details["snapshot"]["synthetic_rules"]
         self.reject()
 
+    def test_mf_item_id_length_boundary_without_truncation(self):
+        for length in (39, 40):
+            with self.subTest(length=length):
+                self.binding = replace(self.binding, ex_item_id="i" * length)
+                self.assertEqual(self.convert()["args"]["ex_item_id"], "i" * length)
+        for length in (41, 200):
+            with self.subTest(length=length), self.assertRaises(CandidateError):
+                replace(self.binding, ex_item_id="i" * length)
+
+    def test_mf_remark_length_boundary_counts_characters_and_never_truncates(self):
+        for length in (99, 100, 101, 500):
+            with self.subTest(length=length):
+                payee = "店" * length
+                self.details = self.make_details(self.text.replace("架空店舗", payee))
+                before = copy.deepcopy(self.details)
+                if length <= 100:
+                    result = self.convert()
+                    self.assertEqual(result["args"]["remark"], payee)
+                    self.assertEqual(result["payee"], payee)
+                    self.assertEqual(result["needs_confirmation"], ["purpose"])
+                else:
+                    with self.assertRaisesRegex(CandidateError, "payee_exceeds_mf_remark_limit"):
+                        self.convert()
+                self.assertEqual(self.details, before)
+
+    def test_mf_value_maximum_and_service_precision_without_rounding_or_clamping(self):
+        # MF permits 999999999999.999; the service's two-decimal constraint
+        # makes .99 the greatest supported fractional amount at that magnitude.
+        accepted = ("999999999999", "999999999999.98", "999999999999.99")
+        rejected = ("1000000000000", "1000000000000.00", "9999999999999999",
+                    "999999999999.999", "999999999999.991", "1000000000000.001")
+        for total in accepted + rejected:
+            with self.subTest(total=total):
+                self.details = self.make_details(self.text.replace("500円", total + "円"))
+                # The parser deliberately doesn't extract three-decimal money;
+                # set a selected field too, to exercise this converter's guard.
+                self.details["snapshot"]["fields"]["total"].update(
+                    status="extracted", value=total, candidates=[total])
+                self.details["snapshot"]["rule_check"].update(status="warning", blocked=False)
+                before = copy.deepcopy(self.details)
+                if total in accepted:
+                    self.assertEqual(self.convert()["args"]["value"], total)
+                else:
+                    with self.assertRaisesRegex(CandidateError, "invalid_receipt_amount"):
+                        self.convert()
+                self.assertEqual(self.details, before)
+
     def test_blocked_or_unresolved_rule_is_rejected(self):
         for key, value in (("blocked", True), ("blocked", None), ("blocked", 0),
                            ("status", "blocked"), ("status", "needs_confirmation")):
@@ -217,12 +264,14 @@ class ReceiptMFCandidateTests(unittest.TestCase):
                 self.assertNotIn(key, result["args"])
 
     def test_tax_fields_are_not_sent_or_used_to_calculate_total(self):
+        # The MF API has excise_value; this tool's create interface does not.
         self.details["snapshot"]["fields"]["tax_amount"] = {"value": "999999"}
         self.details["snapshot"]["fields"]["tax_rate"] = {"value": "99"}
         args = self.convert()["args"]
         self.assertEqual(args["value"], "500")
         self.assertNotIn("tax_amount", args)
         self.assertNotIn("tax_rate", args)
+        self.assertNotIn("excise_value", args)
 
     def test_registration_missing_is_optional_conflict_waits_and_shape_is_checked(self):
         self.details = self.make_details(self.text.split("\n登録番号:")[0])

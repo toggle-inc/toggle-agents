@@ -19,6 +19,12 @@ import math
 import re
 
 
+# ExTransactionCreateInput: https://expense.moneyforward.com/api/index.json
+_MF_ITEM_ID_MAX_LENGTH = 40
+_MF_REMARK_MAX_LENGTH = 100
+_MF_VALUE_MAX = Decimal("999999999999.999")
+
+
 class CandidateError(ValueError):
     """Invalid/unsafe candidate; the message is a stable reason, not OCR text."""
 
@@ -33,7 +39,8 @@ class TrustedMFBinding:
     ex_item_name: str
 
     def __post_init__(self):
-        for name, limit in (("company_key", 128), ("office_id", 200), ("ex_item_id", 200)):
+        for name, limit in (("company_key", 128), ("office_id", 200),
+                            ("ex_item_id", _MF_ITEM_ID_MAX_LENGTH)):
             value = getattr(self, name)
             if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1," + str(limit) + "}", value):
                 raise CandidateError("invalid_host_binding")
@@ -113,9 +120,14 @@ def receipt_mf_candidate(details, *, binding, now, today):
     if recognized > today:
         raise CandidateError("future_receipt_date")
     total = _extracted(fields, "total")
-    if not re.fullmatch(r"[0-9]{1,16}(?:\.[0-9]{1,2})?", total) or Decimal(total) <= 0:
+    # Keep the existing service's two-decimal precision even though MF permits
+    # three. Compare the API maximum exactly; never round or clamp a candidate.
+    if (not re.fullmatch(r"[0-9]{1,16}(?:\.[0-9]{1,2})?", total)
+            or not 0 < Decimal(total) <= _MF_VALUE_MAX):
         raise CandidateError("invalid_receipt_amount")
     payee = _extracted(fields, "payee")
+    if len(payee) > _MF_REMARK_MAX_LENGTH:
+        raise CandidateError("payee_exceeds_mf_remark_limit")
     pending = ["purpose"]
     if any(word in binding.ex_item_name for word in ("会議費", "交際", "歓送迎", "懇親", "飲食")):
         pending.extend(("own_count", "other_count", "own_names", "other_names"))
