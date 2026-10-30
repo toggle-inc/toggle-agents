@@ -160,6 +160,26 @@ class SAAttachmentClientTests(unittest.TestCase):
             "source_attachment_manifest", "source_attachment_manifest", "source_attachment_read"])
         self.assertEqual(self.client.owner, self.person.owner)
 
+    def test_bounded_source_wait_allows_slow_response_without_extending_proof(self):
+        def delayed(request, response):
+            self.assertEqual(request.extensions["timeout"]["read"], 30)
+            self.history.now += 12
+            return response
+        self.server.response_transform = delayed
+        self.assertEqual(self.client.manifest()["sourceMessageId"], "anchor")
+        self.assertLessEqual(self.server.claims[0]["exp"] - self.server.claims[0]["iat"], 60)
+        self.assertEqual(len(self.server.calls), 1)
+
+    def test_timeout_has_fixed_safe_diagnostic_and_is_not_retried(self):
+        def timeout(request, response):
+            raise httpx.ReadTimeout("untrusted secret-bearing response must not leak", request=request)
+        self.server.response_transform = timeout
+        with self.assertRaises(ExpenseError) as caught:
+            self.client.manifest()
+        self.assertIn("response_timeout", str(caught.exception))
+        self.assertNotIn("untrusted", str(caught.exception))
+        self.assertEqual(len(self.server.calls), 1)
+
     def test_only_opaque_references_are_accepted_before_http(self):
         for value in (None, {}, "https://evil.example.test/a", "http://localhost/a", "file:///tmp/a",
                       "attachment:", "attachment:../file-a", "attachment:file-a?x=1", "file-a"):

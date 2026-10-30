@@ -31,6 +31,13 @@ MANIFEST_PATH = "/api/integrations/agentize/chat/source-attachment-manifest"
 ATTACHMENT_PATH = "/api/integrations/agentize/chat/source-attachment"
 TYPES = frozenset({"application/pdf", "image/png", "image/jpeg", "image/heic"})
 MANIFEST_LIMIT = 1024 * 1024
+SOURCE_READ_TIMEOUT = 30
+
+
+class _ManifestFailure(ValueError):
+    """Fixed diagnostic phase only; never carry remote text or credentials."""
+    def __init__(self, phase):
+        self.phase = phase
 
 
 def _json(value):
@@ -95,7 +102,7 @@ class SAAttachmentClient:
         self.owner, self._resolve, self.agent_slug = owner, resolve_binding, agent_slug
         self.clock, self._key, self._closed = clock, key, False
         self._http = http if http is not None else httpx.Client(
-            timeout=10, follow_redirects=False, trust_env=False)
+            timeout=SOURCE_READ_TIMEOUT, follow_redirects=False, trust_env=False)
 
     def close(self):
         if not self._closed:
@@ -168,7 +175,7 @@ class SAAttachmentClient:
             "X-Agent-Source-Read-Proof": proof, "Content-Type": "application/json",
             "Accept": "application/json" if attachment_id is None else "application/octet-stream",
             "Accept-Encoding": "identity",
-        }, follow_redirects=False, timeout=10), expires
+        }, follow_redirects=False, timeout=SOURCE_READ_TIMEOUT), expires
 
     @staticmethod
     def _response(response, content_type):
@@ -182,9 +189,22 @@ class SAAttachmentClient:
             raise ValueError
 
     def _manifest(self, binding):
+        try:
+            return self._manifest_response(binding)
+        except httpx.TimeoutException:
+            raise _ManifestFailure("response_timeout") from None
+        except _ManifestFailure:
+            raise
+        except Exception:
+            raise _ManifestFailure("response_validation") from None
+
+    def _manifest_response(self, binding):
         stream, expires = self._request(binding, MANIFEST_PATH, "source_attachment_manifest")
         with stream as response:
-            self._response(response, "application/json")
+            try:
+                self._response(response, "application/json")
+            except Exception:
+                raise _ManifestFailure("response_headers") from None
             content = bytearray()
             for chunk in response.iter_bytes():
                 if len(chunk) > MANIFEST_LIMIT - len(content):
@@ -199,7 +219,7 @@ class SAAttachmentClient:
                 or type(data["expiresAt"]) is not int
                 or not self.clock() * 1000 < data["expiresAt"] <= expires * 1000
                 or not isinstance(data["attachments"], list) or len(data["attachments"]) > 100):
-            raise ValueError
+            raise _ManifestFailure("manifest_binding")
         canonical, ids = [], set()
         for item in data["attachments"]:
             if (not isinstance(item, dict) or set(item) != {"id", "filename", "contentType", "size"}
@@ -208,13 +228,13 @@ class SAAttachmentClient:
                     or any(ord(c) < 32 or ord(c) == 127 for c in item["filename"])
                     or not _label(item["contentType"], 128)
                     or type(item["size"]) is not int or not 0 <= item["size"] <= 2**53 - 1):
-                raise ValueError
+                raise _ManifestFailure("manifest_items")
             ids.add(item["id"])
             # SA's strict schema constructs these fields in this order before
             # JS JSON.stringify; JSON response property order is not authority.
             canonical.append({k: item[k] for k in ("id", "filename", "contentType", "size")})
         if data["manifestSha256"] != _sha(_json(canonical)):
-            raise ValueError
+            raise _ManifestFailure("manifest_digest")
         self._current(binding)
         if self.clock() * 1000 >= data["expiresAt"]:
             raise ValueError
@@ -224,6 +244,8 @@ class SAAttachmentClient:
         """Current source's exact manifest, never a caller-supplied source ID."""
         try:
             return self._manifest(self._current())
+        except _ManifestFailure as error:
+            raise ExpenseError("起点の添付一覧を安全に取得できません。（" + error.phase + "）") from None
         except Exception:
             raise ExpenseError("起点の添付一覧を安全に取得できません。") from None
 
@@ -265,5 +287,9 @@ class SAAttachmentClient:
             if self.clock() >= expires or self.clock() * 1000 >= manifest["expiresAt"]:
                 raise ValueError
             return bytes(content), item["contentType"]
+        except _ManifestFailure as error:
+            raise ExpenseError("起点の添付を安全に取得できません。（" + error.phase + "）") from None
+        except httpx.TimeoutException:
+            raise ExpenseError("起点の添付を安全に取得できません。（binary_response_timeout）") from None
         except Exception:
             raise ExpenseError("起点の添付を安全に取得できません。") from None
