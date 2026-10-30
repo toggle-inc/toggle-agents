@@ -13,7 +13,6 @@ close() closes this facade only, never the shared store. Records are bounded to
 """
 
 import contextlib
-import datetime as dt
 import hashlib
 import json
 import math
@@ -23,7 +22,7 @@ import uuid
 
 from cryptography.fernet import Fernet
 
-from .state import ExpenseError, OutcomeUnknownError, digest
+from .state import ExpenseError, OutcomeUnknownError, digest, _memory_values, _memory_entry, _check_memory
 
 
 def _json(value):
@@ -254,22 +253,10 @@ class DurableState:
         return None
 
     def propose_fact(self, kind, content, due_date=""):
-        if (kind not in {"commuter_pass", "base_location", "formatting", "pending", "preference"}
-                or not isinstance(content, str) or not 1 <= len(content) <= 1000):
-            raise ExpenseError("記憶の種類または長さが不正です。")
-        if kind == "pending":
-            try:
-                due_date = dt.date.fromisoformat(due_date).isoformat()
-            except (TypeError, ValueError):
-                raise ExpenseError("保留には確認予定日が必要です。") from None
-        elif due_date:
-            raise ExpenseError("確認予定日は保留にだけ指定できます。")
-        if re.search(r"(?i)token|password|secret|認可コード|パスワード|口座|秘密|sk-[\w-]+|"
-                     r"https?://|[\w.+-]+@[\w.-]+|\b\d{10,}\b", content):
-            raise ExpenseError("秘密・口座・個人情報を記憶できません。一般的な決まりに言い換えてください。")
+        values = _memory_values(kind, content, due_date)
         identifier = uuid.uuid4().hex
         row = {"id": identifier, "kind": kind, "content": content, "status": "proposed",
-               "created": self.clock(), "due_date": due_date or None}
+               "created": self.clock(), "due_date": values["due_date"]}
         with self._record() as data:
             data["facts"][identifier] = row
         return {k: row[k] for k in ("id", "kind", "content", "status")}
@@ -285,21 +272,61 @@ class DurableState:
     def facts(self):
         with self._record() as data:
             return [{k: row[k] for k in ("id", "kind", "content", "status", "due_date")}
-                    for row in sorted(data["facts"].values(), key=lambda r: (r["created"], r["id"]))]
+                    for row in sorted((r for r in data["facts"].values() if r["status"] != "deleted"),
+                                      key=lambda r: (r["created"], r["id"]))]
+
+    def memory_entries(self):
+        """Trusted GUI host only; deleted entries are not listed."""
+        return [_memory_entry(row, self._binding) for row in self.facts()]
+
+    def _change_memory(self, identifier, expected_digest, action, values=None):
+        # The supplied store transaction must be serializable across instances.
+        # No digest check happens before the transaction or after mutation.
+        with self._record() as data:
+            row = data["facts"].get(identifier)
+            allowed = {"proposed"} if action == "confirm" else {"active"} if action == "update" else {
+                "proposed", "active", "retired", "done"}
+            _check_memory(row, expected_digest, self._binding, allowed)
+            if action == "delete":
+                result = {"id": identifier, "status": "deleted"}
+                data["facts"][identifier] = dict(result)
+            else:
+                if action == "confirm":
+                    row["status"] = "active"
+                else:
+                    row.update(values)
+                result = _memory_entry(row, self._binding)
+        return result
+
+    def confirm_memory(self, identifier, expected_digest):
+        """Trusted GUI only. CAS-confirm a proposed item; never an LLM tool."""
+        return self._change_memory(identifier, expected_digest, "confirm")
+
+    def update_memory(self, identifier, expected_digest, kind, content, due_date=""):
+        """Trusted GUI only. Edit an active item in place using its exact digest."""
+        return self._change_memory(identifier, expected_digest, "update", _memory_values(kind, content, due_date))
+
+    def delete_memory(self, identifier, expected_digest):
+        """Trusted GUI only. CAS-remove content; a deleted ID cannot be revived."""
+        return self._change_memory(identifier, expected_digest, "delete")
+
+    def active_facts(self):
+        """Conversation input: approved active facts only, never GUI digests."""
+        return [row for row in self.facts() if row["status"] == "active"]
 
     def due_pending(self, today):
-        return [row for row in self.facts() if row["kind"] == "pending" and row["status"] == "active"
+        return [row for row in self.active_facts() if row["kind"] == "pending" and row["status"] == "active"
                 and row["due_date"] and row["due_date"] <= today.isoformat()]
 
     def retire_fact(self, identifier):
         with self._record() as data:
-            if identifier in data["facts"]:
+            if identifier in data["facts"] and data["facts"][identifier]["status"] != "deleted":
                 data["facts"][identifier]["status"] = "retired"
 
     def complete_pending(self, identifier):
         with self._record() as data:
             row = data["facts"].get(identifier)
-            if row and row["kind"] == "pending" and row["status"] == "active":
+            if row and row["status"] == "active" and row["kind"] == "pending":
                 row["status"] = "done"
 
     def suggestion_due(self, *, heartbeat=False, urgent=False, failed=False):

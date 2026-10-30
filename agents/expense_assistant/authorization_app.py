@@ -14,6 +14,7 @@ from runtime.authorization import (
     AuthorizationError,
 )
 from runtime.requester import RequesterDispatcher
+from runtime.memory_management import MemoryRequestError
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
@@ -107,6 +108,7 @@ def create_app(
     service_connections=None,
     history_factory=None,
     history_boundary_migration=False,
+    memory_management=None,
 ):
     """Host supplies SSO verification + private storage/providers, not auth logic.
 
@@ -131,11 +133,16 @@ def create_app(
         ):
             raise ValueError("Draft consent must use this same agent-owned authority")
     origin = authority.issuer
+    if memory_management is not None:
+        from runtime.memory_management import MemoryManagement
+        if not isinstance(memory_management, MemoryManagement) or memory_management.store is not authority.store:
+            raise ValueError('Memory management must use this same private store')
     if service_connections is not None:
         from runtime.service_connections import ServiceConnections
 
         if not isinstance(service_connections, ServiceConnections) or service_connections.store is not authority.store:
             raise ValueError("Service connections must use this same private store")
+        service_connections.personal_memory_supported = memory_management is not None
     if platform_login is not None:
         from runtime.platform_login import PlatformLogin
 
@@ -175,6 +182,38 @@ def create_app(
     async def endpoint(request):
         try:
             path = request.url.path
+            if path in {'/memory', '/memory/decision'}:
+                person = authority._login(request)
+                if memory_management is None:
+                    return JSONResponse({'error': 'memory_unavailable'}, status_code=503)
+                if path == '/memory':
+                    query = _parameters(request.url.query) if request.url.query else {}
+                    if set(query) - {'cursor'}:
+                        raise AuthorizationError('invalid_request')
+                    try:
+                        return memory_management.render(person, as_json=request.headers.getlist('accept') == ['application/json'],
+                                                        cursor=query.get('cursor'))
+                    except MemoryRequestError:
+                        return JSONResponse({'error': 'invalid_memory_request'}, status_code=400)
+                    except Exception:
+                        return JSONResponse({'error': 'memory_unavailable'}, status_code=503)
+                if request.url.query:
+                    raise AuthorizationError('invalid_request')
+                if ((platform_login is None and request.headers.getlist('origin') != [origin])
+                        or (platform_login is not None and not platform_login.allows_consent_origin(request))):
+                    raise AuthorizationError('invalid_request')
+                params = await _form(request)
+                try:
+                    result = memory_management.decide(person, params)
+                except MemoryRequestError:
+                    return JSONResponse({'error': 'invalid_memory_request'}, status_code=400)
+                except Exception:
+                    return JSONResponse({'error': 'memory_decision_conflict'}, status_code=409)
+                if request.headers.getlist('accept') == ['application/json']:
+                    return JSONResponse(result)
+                return HTMLResponse('<!doctype html><html lang="ja"><meta charset="utf-8">'
+                    '<title>記憶の更新</title><h1>記憶を更新しました</h1>'
+                    '<a href="/memory">本人の記憶に戻る</a></html>')
             if path == "/execution/status":
                 if (platform_login is None or not platform_login.allows_consent_origin(request)
                         or request.url.query or request.headers.get("content-type", "").split(";", 1)[0] != "application/json"):
@@ -436,6 +475,8 @@ def create_app(
             ("/connections/start", ["POST"]),
             ("/connections/callback", ["GET", "POST"]),
             ("/execution/status", ["POST"]),
+            ("/memory", ["GET"]),
+            ("/memory/decision", ["POST"]),
         )
     ]
     if login_adapter is not None:

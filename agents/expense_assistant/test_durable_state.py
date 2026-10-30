@@ -317,7 +317,8 @@ class DurableStateTests(unittest.TestCase):
 
     def test_llm_tool_dispatch_cannot_issue_consent_or_approvals(self):
         service = ExpenseService(mf=Mock(owner=self.state.owner), state=self.state, write_enabled=True)
-        for operation in ('set_draft_consent', 'approve', 'approve_external', 'execute', 'accept_fact'):
+        for operation in ('set_draft_consent', 'approve', 'approve_external', 'execute', 'accept_fact',
+                          'memory_entries', 'confirm_memory', 'update_memory', 'delete_memory'):
             with self.subTest(operation=operation), self.assertRaises(ExpenseError):
                 service.call(operation, {})
         with self.assertRaises(ExpenseError):
@@ -340,6 +341,38 @@ class DurableStateTests(unittest.TestCase):
         self.now += 7 * 86400
         self.assertTrue(self.make().suggestion_due())
         self.assertFalse(self.make().suggestion_due(urgent=True))
+
+    def test_memory_gui_mutation_rollback_on_store_failure_and_retry(self):
+        proposal = self.state.propose_fact("preference", "架空の確認方法")
+        entry = self.state.memory_entries()[0]
+        before = copy.deepcopy(self.store.rows)
+        self.store.fail_writes = True
+        with self.assertRaises(ExpenseError):
+            self.state.confirm_memory(proposal["id"], entry["digest"])
+        self.assertEqual(self.store.rows, before)
+        self.store.fail_writes = False
+        active = self.make().confirm_memory(proposal["id"], entry["digest"])
+        for mutate in (lambda: self.state.update_memory(active["id"], active["digest"], "preference", "架空の変更"),
+                       lambda: self.state.delete_memory(active["id"], active["digest"])):
+            before = copy.deepcopy(self.store.rows)
+            self.store.fail_writes = True
+            with self.assertRaises(ExpenseError):
+                mutate()
+            self.assertEqual(self.store.rows, before)
+            self.store.fail_writes = False
+            self.assertEqual(self.make().memory_entries(), [active])
+
+    def test_memory_digest_is_owner_namespace_bound_even_for_same_id_and_content(self):
+        item = self.state.propose_fact("preference", "架空の同じ内容")
+        entry = self.state.memory_entries()[0]
+        with self.state._record() as data:
+            row = copy.deepcopy(data["facts"][item["id"]])
+        for other in (self.make("bob"), self.make(namespace="other")):
+            with other._record() as data:
+                data["facts"][item["id"]] = copy.deepcopy(row)
+            self.assertNotEqual(other.memory_entries()[0]["digest"], entry["digest"])
+            with self.assertRaises(ExpenseError):
+                other.confirm_memory(item["id"], entry["digest"])
 
     def test_size_limit_fails_closed_without_dropping_history(self):
         p = self.preview()

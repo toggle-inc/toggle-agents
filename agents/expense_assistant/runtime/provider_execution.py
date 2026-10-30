@@ -120,6 +120,24 @@ class ProviderExecutionResolver:
             raise ExpenseError("本人の初回許可操作の有効期限を確認してください。")
         return service
 
+    def memory_service(self, person):
+        """Verified-human GUI only. Exact decisions are authorized in the GUI.
+
+        This does not issue MCP grants or bind MF/calendar credentials.
+        """
+        if (self.profile is None
+                or not {'memory:read', 'memory:propose'} <= self.profile.capabilities
+                or not isinstance(person, Requester) or person.kind != 'human'
+                or not _valid_id(person.tenant_id) or not _valid_id(person.person_id)
+                or (self.tenant_id is not None and person.tenant_id != self.tenant_id)
+                or not _unexpired(person.expires_at, self.clock())):
+            raise ExpenseError('本人専用の記憶管理はまだ利用できません。')
+        service = self.profile.service(person=person, mf=None, calendar=None,
+                                       clock=self.clock, capability='memory:read')
+        if service.state.owner != person.owner or not _unexpired(person.expires_at, self.clock()):
+            raise ExpenseError('本人専用の記憶管理を確認できません。')
+        return service
+
     def readiness_reason(self, person, capability):
         """Safe diagnostics after a failed grant, never a permission decision."""
         if capability not in self.CAPABILITIES:

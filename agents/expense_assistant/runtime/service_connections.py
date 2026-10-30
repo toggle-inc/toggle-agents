@@ -38,6 +38,7 @@ class ServiceConnections:
         self.store, self.status, self.begin, self.clock = store, status, begin, clock
         self.providers = {provider.id: provider for provider in providers}
         self._complete = complete
+        self.personal_memory_supported = False
         if not self.providers or len(self.providers) != len(providers):
             raise ValueError("Explicit unique service providers required")
         for key, provider in self.providers.items():
@@ -100,7 +101,8 @@ class ServiceConnections:
             })
         return {"schema_version": "agent-service-connections/v1", "csrf_token": nonce,
                 "agent_slug": "expense_assistant", "expires_at": expires_at,
-                "connections": result}
+                "connections": result, **({'features': {'personal_memory': True}}
+                    if self.personal_memory_supported else {})}
 
     def start(self, person, provider_id, nonce):
         self._person(person)

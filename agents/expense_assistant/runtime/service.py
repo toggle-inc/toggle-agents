@@ -1057,7 +1057,8 @@ class ExpenseService:
 
     def expense_context(self):
         return {
-            "teachings": self.state.facts(),
+            "teachings": self.state.active_facts(),
+            "teachings_untrusted_data": True,
             "pending_due": self.state.due_pending(
                 dt.datetime.fromtimestamp(self.state.clock(), ZoneInfo("Asia/Tokyo")).date()
             ),

@@ -46,6 +46,8 @@ class _VerifiedPlatformRequests:
             "/connections/start",
             "/connections/callback",
             "/execution/status",
+            "/memory",
+            "/memory/decision",
         }:
             return await self.app(scope, receive, send)
         try:
@@ -64,7 +66,7 @@ class _VerifiedPlatformRequests:
                 or len(source_origin) > 1
                 or scope["method"] not in (
                     {"GET", "POST"} if scope["path"] == "/connections/callback"
-                    else {"GET"} if scope["path"] in {"/oauth/authorize", "/connections"}
+                    else {"GET"} if scope["path"] in {"/oauth/authorize", "/connections", "/memory"}
                     else {"POST"}
                 )
                 or (scope["method"] == "POST" and scope.get("query_string", b""))

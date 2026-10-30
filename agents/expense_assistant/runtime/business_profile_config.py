@@ -105,6 +105,7 @@ def prepare_business_profile(value, *, environ, allowed_people):
                 raise AssertionError("configuration must not access the store")
         factory(None, ValidationStore(), **({"attachment_factory": lambda _: None} if draft_factory else {}))
         factory.requires_source_attachments = draft_factory is not None
+        factory.supports_personal_memory = {'memory:read', 'memory:propose'} <= capabilities
         return factory
     except Exception:
         raise ValueError("Invalid explicit business profile configuration") from None

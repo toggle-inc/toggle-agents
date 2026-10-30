@@ -337,9 +337,12 @@ def create_app(*, environ=None, store_factory=None, history_source_factory=None,
         history_options["history_boundary_migration"] = settings.history.boundary_migration
 
     try:
+        memory_options = {}
+        if getattr(business_profile_factory, 'supports_personal_memory', False):
+            memory_options['memory_service_factory'] = lambda store: lambda person: execution['resolver'].memory_service(person)
         app = create_platform_host(settings.host, resolve_person=settings.resolve_person,
                                    resolve_connection=resolve_connection, store_factory=configured_store_factory,
-                                   service_connections_factory=connections, **history_options)
+                                   service_connections_factory=connections, **history_options, **memory_options)
         return _CloudAuthApp(app, settings, resources)
     except Exception:
         try:
