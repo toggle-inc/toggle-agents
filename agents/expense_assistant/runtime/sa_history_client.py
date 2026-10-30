@@ -204,8 +204,15 @@ class SAHistoryClient:
         proof = jwt.encode(claims, self._key, algorithm="RS256", headers={"kid": self.kid, "typ": "agent-source-read+jwt"})
         with self._http.stream("POST", target, content=payload, headers={
             "X-Agent-Source-Read-Proof": proof, "Content-Type": "application/json", "Accept": "application/json",
+            "Accept-Encoding": "identity",
         }, follow_redirects=False, timeout=10) as response:
             if response.status_code != 200 or response.headers.get("content-type", "").split(";", 1)[0] != "application/json":
+                raise ValueError
+            # httpx decodes content before yielding iter_bytes chunks. Reject
+            # compression before touching the stream so the byte limit cannot
+            # be bypassed by a decompression allocation.
+            encodings = response.headers.get_list("content-encoding")
+            if encodings and (len(encodings) != 1 or encodings[0].strip().lower() != "identity"):
                 raise ValueError
             chunks, total = [], 0
             for chunk in response.iter_bytes():

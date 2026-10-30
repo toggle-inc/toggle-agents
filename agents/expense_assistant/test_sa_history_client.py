@@ -52,6 +52,7 @@ class SyntheticSA:
         with self.lock:
             self.calls.append(request)
             assert request.method == "POST"
+            assert request.headers["accept-encoding"] == "identity"
             assert str(request.url) == "https://sa.example.test" + PATH
             assert "authorization" not in request.headers
             assert "x-agent-source-context" not in request.headers
@@ -231,6 +232,47 @@ class SAHistoryClientTests(unittest.TestCase):
         result = create_reader(self.client, lambda: resolved.invocation, clock=lambda: self.now).read()
         self.assertEqual(result["status"], "available")
         self.assertIn("ブルーバード", result["messages"][-1]["text"])
+
+    def test_compressed_or_ambiguous_encoding_rejected_without_stream_consumption(self):
+        import gzip
+        class CountedStream(httpx.SyncByteStream):
+            def __init__(self):
+                self.reads = self.closes = 0
+            def __iter__(self):
+                self.reads += 1
+                yield gzip.compress(b"synthetic compressed content")
+            def close(self):
+                self.closes += 1
+        for encoding_headers in (
+            [("content-encoding", "gzip")], [("content-encoding", "br")],
+            [("content-encoding", "deflate")], [("content-encoding", "zstd")],
+            [("content-encoding", "identity, gzip")],
+            [("content-encoding", "identity"), ("content-encoding", "gzip")],
+            [("content-encoding", "")],
+        ):
+            stream = CountedStream()
+            def respond(request):
+                self.assertEqual(request.headers["accept-encoding"], "identity")
+                return httpx.Response(200, headers=[("content-type", "application/json"), *encoding_headers], stream=stream)
+            client = self.make_client(self.server, httpx.Client(transport=httpx.MockTransport(respond)))
+            try:
+                with self.assertRaises(ContextError) as caught:
+                    client.resolve_source(self.reference)
+                self.assertEqual(str(caught.exception), "history_read_failed")
+                self.assertEqual(stream.reads, 0, encoding_headers)
+                self.assertEqual(stream.closes, 1, encoding_headers)
+            finally:
+                client.close()
+
+    def test_explicit_identity_response_is_accepted(self):
+        def respond(request):
+            response = self.server(request)
+            response.headers["content-encoding"] = "identity"
+            return response
+        client = self.make_client(self.server, httpx.Client(transport=httpx.MockTransport(respond)))
+        self.addCleanup(client.close)
+        result = client.resolve_source(self.reference)
+        self.assertEqual(result.invocation.anchor, "anchor")
 
     def test_wrong_reference_expired_or_client_closed_never_sends_http(self):
         for ref in (self.ref(source_actor="other-person"), self.ref(source_namespace="other-tenant"),
