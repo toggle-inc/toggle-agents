@@ -105,6 +105,7 @@ def create_app(
     draft_consent=None,
     platform_login=None,
     service_connections=None,
+    history_factory=None,
 ):
     """Host supplies SSO verification + private storage/providers, not auth logic.
 
@@ -155,7 +156,15 @@ def create_app(
             raise ValueError("Okta adapter tenant, session verifier, and fixed callback must match")
         start_login = login_adapter.start_login
     dispatcher = RequesterDispatcher(authority.authenticate, resolve, clock=authority.clock)
-    mcp = create_mcp(dispatcher, urlsplit(origin).hostname)
+    history_options = {}
+    if history_factory is not None:
+        if not callable(history_factory):
+            raise ValueError("Explicit store-aware history factory required")
+        pair = history_factory(authority.store)
+        if not isinstance(pair, tuple) or len(pair) != 2 or any(v is None for v in pair):
+            raise ValueError("Explicit history runtime and resolver required")
+        history_options = {"history_runtime": pair[0], "history_resolver": pair[1]}
+    mcp = create_mcp(dispatcher, urlsplit(origin).hostname, **history_options)
 
     async def endpoint(request):
         try:

@@ -53,6 +53,7 @@ class CloudAuthSettings:
     encryption_key: bytes = field(repr=False)
     mf_secret: str = field(repr=False)
     google_secret: str = field(repr=False)
+    history: object = field(default=None, repr=False)
 
     def __repr__(self):
         return "CloudAuthSettings(<redacted>)"
@@ -72,7 +73,7 @@ def settings_from_environment(environ=None):
     try:
         config = json.loads(env["EXPENSE_AUTH_CONFIG"], object_pairs_hook=_unique_object)
         _fields(config, ("origin", "tenant_id", "platform_issuer", "platform_public_keys", "clients",
-                         "identity_links", "provider_namespace", "ingress_mode"), ("mf", "google"))
+                         "identity_links", "provider_namespace", "ingress_mode"), ("mf", "google", "history"))
         origin, issuer = _origin(config["origin"]), _origin(config["platform_issuer"])
         tenant = _text(config["tenant_id"])
         if config["ingress_mode"] not in ("cloud_run_tls", "asgi_tls"):
@@ -134,10 +135,18 @@ def settings_from_environment(environ=None):
             elif secret:
                 raise ValueError
             providers[name], secrets[name] = metadata, secret
+        history = None
+        if "history" in config and not (
+            isinstance(config["history"], dict) and set(config["history"]) == {"enabled"}
+            and config["history"]["enabled"] is False
+        ):
+            from runtime.cloud_history_config import parse_cloud_history
+            history = parse_cloud_history(config["history"], audience=origin, tenant_id=tenant,
+                                          allowed_people=people, platform_issuer=issuer)
         return CloudAuthSettings(
             PlatformAuthorizationHostSettings(origin, tenant, issuer, config["platform_public_keys"], tuple(clients), dsn),
             config["ingress_mode"], tuple(links), _text(config["provider_namespace"]),
-            providers["mf"], providers["google"], key, secrets["mf"], secrets["google"],
+            providers["mf"], providers["google"], key, secrets["mf"], secrets["google"], history,
         )
     except Exception:
         raise ValueError("Invalid dedicated expense auth configuration") from None
@@ -156,6 +165,22 @@ class _NotConfiguredProvider:
         raise ValueError("Provider deployment is unavailable")
 
 
+def _close_resources(resources):
+    """Drain once, in reverse order; continue closing after a cleanup failure."""
+    seen, failed = set(), False
+    while resources:
+        resource = resources.pop()
+        if id(resource) in seen:
+            continue
+        seen.add(id(resource))
+        try:
+            resource.close()
+        except Exception:
+            failed = True
+    if failed:
+        raise ValueError("Dedicated expense resource cleanup failed") from None
+
+
 class _CloudAuthApp:
     def __init__(self, app, settings, resources):
         self.app, self._settings, self._resources = app, settings, resources
@@ -165,8 +190,7 @@ class _CloudAuthApp:
             try:
                 return await self.app(scope, receive, send)
             finally:
-                for resource in reversed(self._resources):
-                    resource.close()
+                _close_resources(self._resources)
         if scope["type"] == "http":
             # Only deployment's explicit TLS-terminator contract establishes TLS.
             # No remote address, Forwarded or X-Forwarded-* value establishes it.
@@ -182,11 +206,31 @@ class _CloudAuthApp:
         return await self.app(scope, receive, send)
 
 
-def create_app(*, environ=None, store_factory=None):
+def create_app(*, environ=None, store_factory=None, history_source_factory=None):
     """Uvicorn factory; no secret reads or database access at module import."""
     logging.disable(logging.CRITICAL)
     settings = settings_from_environment(environ)
+    real_source = settings.history.source_read if settings.history is not None else None
+    if settings.history is not None and history_source_factory is not None and not callable(history_source_factory):
+        raise ValueError("Enabled cloud history requires an explicit source adapter")
+    if settings.history is not None and history_source_factory is None:
+        if real_source is None:
+            raise ValueError("Enabled cloud history requires an explicit source adapter")
+        from runtime.sa_history_client import SAHistoryClient, validate_source_read_key
+        history_env = os.environ if environ is None else environ
+        validate_source_read_key(history_env.get(real_source.signing_key_env, ""))
     resources = []
+    if settings.history is not None and history_source_factory is None:
+        def history_source_factory(history_settings, store):
+            client = SAHistoryClient(
+                origin=real_source.origin, agent_origin=settings.host.origin,
+                source_namespace=real_source.source_namespace, source_actor=real_source.source_actor,
+                target=real_source.target, kid=real_source.kid,
+                signing_private_key=history_env.get(real_source.signing_key_env, ""),
+                agent_authors=real_source.agent_authors,
+            )
+            resources.append(client)
+            return client, client.resolve_source
     execution = {}
 
     def resolve_connection(person, capability):
@@ -223,14 +267,30 @@ def create_app(*, environ=None, store_factory=None):
         bind_execution(store, SimpleNamespace(mf=mf_adapter, calendar=calendar))
         return build_service_connections(store, mf=mf_adapter if mf or google else _NotConfiguredProvider(), calendar=calendar)
 
+    configured_store_factory = store_factory
+    history_options = {}
+    if settings.history is not None:
+        from runtime.postgres_auth_store import PostgresAuthorizationStore
+        def tracked_store_factory(dsn):
+            store = (store_factory or PostgresAuthorizationStore)(dsn)
+            resources.append(store)
+            return store
+        configured_store_factory = tracked_store_factory
+        from runtime.cloud_history_config import build_cloud_history
+        def history_factory(store):
+            return build_cloud_history(settings.history, store, history_source_factory)
+        history_options["history_factory"] = history_factory
+
     try:
         app = create_platform_host(settings.host, resolve_person=settings.resolve_person,
-                                   resolve_connection=resolve_connection, store_factory=store_factory,
-                                   service_connections_factory=connections)
+                                   resolve_connection=resolve_connection, store_factory=configured_store_factory,
+                                   service_connections_factory=connections, **history_options)
         return _CloudAuthApp(app, settings, resources)
     except Exception:
-        for resource in reversed(resources):
-            resource.close()
+        try:
+            _close_resources(resources)
+        except Exception:
+            pass
         raise ValueError("Dedicated expense auth startup failed") from None
 
 

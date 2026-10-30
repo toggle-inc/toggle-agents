@@ -78,7 +78,7 @@ def settings_from_environment(*, origin, tenant_id, okta_issuer, okta_client_id,
     )
 
 
-def create_host(settings, *, resolve_person, resolve_connection, store_factory=None, service_connections_factory=None):
+def create_host(settings, *, resolve_person, resolve_connection, store_factory=None, service_connections_factory=None, history_factory=None):
     """Compose SSO, consent, refresh/revocation and MCP with the SAME store.
 
     resolve_person(tenant, issuer, subject) is an administrator-managed account
@@ -116,6 +116,7 @@ def create_host(settings, *, resolve_person, resolve_connection, store_factory=N
         login_adapter=okta,
         draft_consent=DraftConsentBinding(authority, resolve_connection),
         service_connections=service_connections_factory(store) if service_connections_factory else None,
+        **({"history_factory": history_factory} if history_factory is not None else {}),
     )
 
 
@@ -146,7 +147,7 @@ def _configured_store(settings, store_factory):
     return (store_factory or PostgresAuthorizationStore)(settings.database_url)
 
 
-def create_platform_host(settings, *, resolve_person, resolve_connection, store_factory=None, service_connections_factory=None):
+def create_platform_host(settings, *, resolve_person, resolve_connection, store_factory=None, service_connections_factory=None, history_factory=None):
     """Preferred route: platform authenticates humans, agent verifies each proof.
 
     No Okta client/secret/callback/session is needed. The deployment must provide
@@ -186,5 +187,6 @@ def create_platform_host(settings, *, resolve_person, resolve_connection, store_
             draft_consent=DraftConsentBinding(authority, resolve_connection),
             platform_login=login,
             service_connections=service_connections_factory(store) if service_connections_factory else None,
+            **({"history_factory": history_factory} if history_factory is not None else {}),
         )
     )

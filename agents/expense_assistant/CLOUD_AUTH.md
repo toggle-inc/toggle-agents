@@ -69,11 +69,13 @@ memory、過去科目の候補、領収書取得・保存・OCR、書込・draft
 
 ## DBと権限
 
-### 任意の履歴接続（コードのみ、既定無効）
+### 任意の履歴接続（既定無効、実接続は配置検証が必要）
 
 `requester_mcp.create_app` は `history_runtime` と `history_resolver` を両方明示したときだけ、
-エージェント内の `ConversationRuntime` をHTTPリクエストへ接続できます。通常のcloud factoryは
-この引数を渡しておらず、環境変数・HTTPヘッダー・モデル本文による自動有効化はありません。
+エージェント内の `ConversationRuntime` をHTTPリクエストへ接続できます。cloud factoryは
+配置管理者が `EXPENSE_AUTH_CONFIG.history.enabled: true` と専用設定を明示した場合だけ
+この引数を渡します。省略または `{"enabled":false}` では従来経路を維持し、履歴の秘密鍵や
+接続クライアントを読み込みません。HTTPヘッダーやモデル本文だけでは有効になりません。
 既存の本人OAuth認証を通った後、trusted resolverが現在の元会話と実行の束縛を検証し、
 明示的なアカウントリンクに基づく `HistoryRequestBinding` を返す必要があります。
 canonical本人/tenantがOAuthの本人と異なる、期限が本人認証を超える、不正な束縛は履歴通信前に401で拒否します。
@@ -91,11 +93,33 @@ canonical本人/tenantがOAuthの本人と異なる、期限が本人認証を�
 
 任意の `runtime.external_history_resolver.ExternalHistoryResolver` は、上記trusted resolverの
 署名検証・本人リンク照合部分を実装します。実bytes/固定targetはopt-in middlewareだけが
-計算して供給します。source APIの認可済み解決adapterと全instance共有replayストアは
-別途接続が必要です。短命proofのissuer/key設定や発行側はこのcloud factoryへ自動追加しません。
+計算して供給します。source APIの認可済み解決adapterを明示的に接続し、全instance共有の
+replay検査には本人認証と同じ `auth_records` ストアを使います。短命proofのissuer/key設定や発行側を自動発見しません。
 仕様と未完了条件は同梱の [`EXECUTION_BINDING.md`](_foundation/EXECUTION_BINDING.md) を参照してください。
 `test_signed_history_http` は実resolver・署名・SDK・Reader・SA形式アダプターまで通しますが、
 source registryとデータは合成fixtureです。本番のsource/sessionをfirst-readで自動束縛しません。
+
+`history` の必須項目は `enabled`, `source_issuer`, `source_public_keys`, `execution_issuer`,
+`execution_public_keys`, `targets`, `identity_links` です。`targets` は
+`{tenant_id,agent_id,version_id,connection_id}`、`identity_links` は
+`{issuer,namespace,subject,person_id}` の配列です。全IDは文字列で、本人は既存の登録者だけに限定します。
+source用公開鍵とEngine実行proof用公開鍵は、それぞれ専用のkid→PEM公開鍵マップとして供給します。
+
+実SAクライアントを使う場合は `history.source_read` に `origin`, `kid`, `source_namespace`,
+`source_actor`, `target`, `agent_authors`, `signing_key_env` を追加します。`target` は上記targetsの
+1件と完全一致し、originはsource_issuerと既存platform_issuerの両方と一致しなければなりません。
+source_actorは明示的な本人リンクが必要です。`agent_authors` は当該エージェントの返信bot ID配列です。
+`signing_key_env` は固定値 `AGENT_SA_SOURCE_READ_SIGNING_PRIVATE_KEY_PEM` だけを許可し、
+専用RSA秘密鍵（2048bit以上）はその環境変数へ配置担当者が安全に供給します。
+秘密鍵をこのJSONやGitに含めません。鍵不足・不正設定はDBを開く前に拒否します。
+
+`runtime.sa_history_client` は固定SA originの
+`POST /api/integrations/agentize/chat/source-snapshot` だけへ、別の短命read proofを送ります。
+source/Engine proofをSAの認証へ転用せず、リダイレクトも追いません。SA側で事前にsessionが
+束縛されている必要があり、各読取で現在の権限・起点revision・失効を確認します。
+元会話の選択・履歴の解釈・読取範囲は引き続きagent側の共通foundationが担当します。
+startup失敗・shutdownではクライアントとDBを閉じます。`test_cloud_history_config` と
+`test_sa_history_client` は合成署名・MockTransportによる検証であり、実SAの往復成功ではありません。
 
 配置担当者が専用DB/roleを確認し、`runtime/postgres_auth_schema.sql` を管理者として適用します。schemaは `expense_assistant_auth`、tableは `auth_records` です。runtime roleに必要なのはschemaのUSAGE、tableのSELECT/INSERT/UPDATEのみです。既存アプリDBや広い管理者roleを指定しないでください。アプリはDDLを実行せず、Postgresの取引とロックを既存API経由で使います。`/health` はプロセス生存確認のみでDB疎通を検査しません。DB疎通・権限は配置担当者が別途確認します。
 
