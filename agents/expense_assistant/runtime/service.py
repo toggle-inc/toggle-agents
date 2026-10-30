@@ -1010,6 +1010,15 @@ class ExpenseService:
                 self.state.withdraw_unused_approval(preview_id)
             return {
                 **result,
+                "reply_text": (
+                    "MFに未提出の経費明細を保存しました。\n"
+                    "[MFで下書きを確認](https://expense.moneyforward.com/transactions)\n"
+                    "MFの会社選択を確認し、内容をご確認ください。申請はまだ提出していません。"
+                    if details["action"] == "create" else
+                    "領収書のOCR処理をMFへ依頼しました（読取・明細保存の完了は未確認です）。\n"
+                    "[MFで読取状況を確認](https://expense.moneyforward.com/transactions)\n"
+                    "MFの会社選択も確認してください。申請はまだ提出していません。"
+                ),
                 "review_url": "https://expense.moneyforward.com/transactions",
                 "review_link_kind": "transaction_list",
                 "review_company": (details["snapshot"].get("office") or {}).get(
