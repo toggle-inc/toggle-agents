@@ -251,14 +251,27 @@ class SAAttachmentClient:
 
     def get(self, reference):
         """Personal fetcher API: opaque attachment:<id> only; returns bytes/MIME."""
+        return self._get(reference)
+
+    def read_for_draft(self, attachment_id=""):
+        """One verified manifest + binary. Never reuse a manifest across calls."""
+        if not isinstance(attachment_id, str):
+            raise ExpenseError("この依頼の添付IDを指定してください。")
+        return self._get("attachment:" + attachment_id, draft=True)
+
+    def _get(self, reference, *, draft=False):
         try:
             if not isinstance(reference, str) or not reference.startswith("attachment:"):
                 raise ValueError
             attachment_id = reference[len("attachment:"):]
-            if not _id(attachment_id):
+            if not _id(attachment_id) and not (draft and attachment_id == ""):
                 raise ValueError
             binding = self._current()
             manifest = self._manifest(binding)
+            if draft and attachment_id == "":
+                if len(manifest["attachments"]) != 1:
+                    raise ValueError
+                attachment_id = manifest["attachments"][0]["id"]
             matches = [v for v in manifest["attachments"] if v["id"] == attachment_id]
             if len(matches) != 1:
                 raise ValueError
@@ -286,7 +299,8 @@ class SAAttachmentClient:
             self._current(binding)
             if self.clock() >= expires or self.clock() * 1000 >= manifest["expiresAt"]:
                 raise ValueError
-            return bytes(content), item["contentType"]
+            result = (bytes(content), item["contentType"])
+            return (*result, manifest) if draft else result
         except _ManifestFailure as error:
             raise ExpenseError("起点の添付を安全に取得できません。（" + error.phase + "）") from None
         except httpx.TimeoutException:

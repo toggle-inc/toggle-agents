@@ -483,15 +483,20 @@ class ExpenseService:
         builder = self._require(self.receipt_drafts, "会社別の経費ルール")
         if not self.receipt_company or files.fetcher is None:
             raise ExpenseError("本人に適用する会社・添付接続を確認してください。")
-        manifest = files.fetcher.manifest()
-        items = manifest["attachments"]
-        if not attachment_id:
-            if len(items) != 1:
-                raise ExpenseError("領収書を1枚添付するか、対象の添付IDを指定してください。")
-            attachment_id = items[0]["id"]
-        if not isinstance(attachment_id, str) or not any(v["id"] == attachment_id for v in items):
-            raise ExpenseError("この依頼に添付された領収書を指定してください。")
-        receipt = files.fetch_attachment("attachment:" + attachment_id)
+        source_reader = getattr(files.fetcher, "read_for_draft", None)
+        if callable(source_reader):
+            content, mime, manifest = source_reader(attachment_id)
+            receipt = files.save(content, mime)
+        else:
+            manifest = files.fetcher.manifest()
+            items = manifest["attachments"]
+            if not attachment_id:
+                if len(items) != 1:
+                    raise ExpenseError("領収書を1枚添付するか、対象の添付IDを指定してください。")
+                attachment_id = items[0]["id"]
+            if not isinstance(attachment_id, str) or not any(v["id"] == attachment_id for v in items):
+                raise ExpenseError("この依頼に添付された領収書を指定してください。")
+            receipt = files.fetch_attachment("attachment:" + attachment_id)
         payload = files.payload(receipt["path"])
         extracted = reader.read(base64.b64decode(payload["content"], validate=True), payload["content_type"])
         draft = builder.build(extracted, receipt["path"], self.receipt_company)

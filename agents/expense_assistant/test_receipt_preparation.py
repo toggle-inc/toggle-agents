@@ -105,7 +105,7 @@ class ReceiptPreparationTests(unittest.TestCase):
         for field in ("mf_registered", "submitted", "approved"):
             self.assertIs(result[field], False)
         self.assertEqual([request.url.path for request in self.source.server.calls], [
-            attachment_fixtures.MANIFEST_PATH, attachment_fixtures.MANIFEST_PATH,
+            attachment_fixtures.MANIFEST_PATH,
             attachment_fixtures.ATTACHMENT_PATH, attachment_fixtures.MANIFEST_PATH])
 
     def test_multiple_images_require_explicit_source_id(self):

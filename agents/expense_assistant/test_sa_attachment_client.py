@@ -188,6 +188,19 @@ class SAAttachmentClientTests(unittest.TestCase):
                     self.client.get(value)
         self.assertEqual(self.server.calls, [])
 
+    def test_draft_read_selects_current_single_attachment_without_duplicate_manifest(self):
+        content, mime, manifest = self.client.read_for_draft()
+        self.assertEqual((content, mime), (self.server.content, "application/pdf"))
+        self.assertEqual(manifest["attachments"][0]["id"], "file-a")
+        self.assertEqual([r.url.path for r in self.server.calls], [MANIFEST_PATH, ATTACHMENT_PATH])
+        self.assertEqual(len(self.server.replay), 2)
+
+    def test_draft_selection_never_accepts_cross_source_id_or_untrusted_manifest(self):
+        for value in (None, {}, "https://evil.example.test/a", "file-b"):
+            with self.subTest(kind=type(value).__name__), self.assertRaises(ExpenseError):
+                self.client.read_for_draft(value)
+        self.assertTrue(all(r.url.path == MANIFEST_PATH for r in self.server.calls))
+
     def test_missing_model_json_cross_person_and_untrusted_anchor_fail_before_http(self):
         for binding in (None, {"reference": self.reference, "sourceMessageId": "anchor"},
                         replace(self.binding, person_id="canonical-bob"),
