@@ -84,6 +84,16 @@ class ProviderExecutionTests(unittest.TestCase):
         self.assertEqual(self.providers.mf.bindings, [person.owner])
         self.assertIsNotNone(self.resolver(self.people["bob"], "mf:read"))
 
+    def test_readiness_distinguishes_provider_outage_from_personal_connection_and_unprovided(self):
+        person = self.people["alice"]
+        for state in ("not_connected", "expired", "revoked"):
+            self.providers.mf.states[person.owner] = state
+            self.assertEqual(self.resolver.readiness_reason(person, "mf:read"), "service_connection_required")
+        for state in ("unavailable", "not_configured"):
+            self.providers.mf.states[person.owner] = state
+            self.assertEqual(self.resolver.readiness_reason(person, "mf:read"), "provider_unavailable")
+        self.assertEqual(self.resolver.readiness_reason(person, "memory:read"), "operation_unavailable")
+
     def test_expiry_kind_tenant_and_absent_agent_permission_deny_before_provider(self):
         person = self.people["alice"]
         for change in (

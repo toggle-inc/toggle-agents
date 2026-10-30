@@ -70,7 +70,7 @@ class ProviderExecutionResolver:
     CAPABILITIES = {"mf:read": "mf", "calendar:read": "calendar", "contract:read": None}
 
     def __init__(self, providers, store, namespace, clock=time.time, *,
-                 service_factory=read_service_factory, tenant_id=None):
+                 service_factory=read_service_factory, tenant_id=None, profile=None):
         if not _valid_id(namespace) or not callable(clock) or not callable(service_factory):
             raise ValueError("Explicit execution namespace, clock and service factory required")
         if store is None or not callable(getattr(store, "transaction", None)):
@@ -79,6 +79,66 @@ class ProviderExecutionResolver:
             raise ValueError("Explicit deployment tenant required")
         self.providers, self.store, self.namespace = providers, store, namespace
         self.clock, self.service_factory, self.tenant_id = clock, service_factory, tenant_id
+        self.profile = profile
+        if profile is not None:
+            from .execution_profile import DurableExecutionProfile
+            if (not isinstance(profile, DurableExecutionProfile) or profile.store is not store
+                    or service_factory is not read_service_factory):
+                raise ValueError("Explicit same-store durable profile required")
+            self.supported_operations = READ_OPERATIONS | profile.supported_operations
+            self.receipt_resources = "receipt:read" in profile.capabilities
+            self.CAPABILITIES = {**self.CAPABILITIES, **{
+                cap: "mf" if cap.startswith("mf:") else "calendar" if cap == "calendar:read" else None
+                for cap in profile.capabilities}}
+
+    def consent_service(self, person):
+        """Trusted initial company-consent UI only, never a business grant/tool.
+
+        A pending authority request is checked by DraftConsentBinding before this
+        method. No scope is minted here; the returned service cannot write to MF.
+        """
+        if (self.profile is None or "mf:draft" not in self.profile.capabilities
+                or not isinstance(person, Requester) or person.kind != "human"
+                or not _valid_id(person.tenant_id) or not _valid_id(person.person_id)
+                or (self.tenant_id is not None and person.tenant_id != self.tenant_id)
+                or not _unexpired(person.expires_at, self.clock())):
+            raise ExpenseError("本人の会社別初回許可の接続を確認してください。")
+        adapter = getattr(self.providers, "mf", None)
+        mf = None
+        # State-only revocation must remain possible when MF is disconnected.
+        # Company choices still call mf_offices and fail without an own provider.
+        try:
+            if adapter is not None and adapter.status(person, "mf") == "connected":
+                candidate = adapter.for_person(person)
+                if candidate.owner == person.owner:
+                    mf = candidate
+        except Exception:
+            mf = None
+        service = self.profile.service(person=person, mf=mf, calendar=None, clock=self.clock,
+                                       capability="mf:read", consent_only=True)
+        if not _unexpired(person.expires_at, self.clock()):
+            raise ExpenseError("本人の初回許可操作の有効期限を確認してください。")
+        return service
+
+    def readiness_reason(self, person, capability):
+        """Safe diagnostics after a failed grant, never a permission decision."""
+        if capability not in self.CAPABILITIES:
+            return "operation_unavailable"
+        provider = self.CAPABILITIES[capability]
+        if provider is None:
+            return "unavailable"
+        adapter = getattr(self.providers, provider, None)
+        if adapter is None:
+            return "operation_unavailable"
+        try:
+            status = adapter.status(person, provider)
+        except Exception:
+            return "provider_unavailable"
+        if status in {"not_connected", "expired", "revoked"}:
+            return "service_connection_required"
+        if status in {"unavailable", "not_configured"}:
+            return "provider_unavailable"
+        return "unavailable"
 
     def __call__(self, person, capability):
         if (
@@ -101,12 +161,16 @@ class ProviderExecutionResolver:
                 bound = adapter.for_person(person)
                 if bound.owner != person.owner:
                     return None
-            service = self.service_factory(
+            durable = self.profile is not None and capability in self.profile.capabilities
+            factory = self.profile.service if durable else self.service_factory
+            service = factory(
                 person=person, mf=bound if provider == "mf" else None,
                 calendar=bound if provider == "calendar" else None, clock=self.clock,
+                **({"capability": capability} if durable else {}),
             )
+            expected_write = self.profile is not None and capability in {"mf:draft", "mf:write"}
             if (
-                not isinstance(service, ExpenseService) or service.write_enabled is not False
+                not isinstance(service, ExpenseService) or service.write_enabled is not expected_write
                 or service.state.owner != person.owner or service.mf.owner != person.owner
                 or (service.calendar is not None and service.calendar.owner != person.owner)
                 or (service.receipts is not None and service.receipts.owner != person.owner)

@@ -81,6 +81,32 @@ class CloudHistoryConfigTests(unittest.TestCase):
         self.assertNotIn(self.fixture.public, repr(settings))
         self.assertNotIn("source-alice", repr(settings))
 
+    def test_boundary_migration_is_explicit_boolean_and_wired_only_with_history(self):
+        import authorization_app
+        self.assertFalse(self.settings(self.history).history.boundary_migration)
+        for invalid in (None, 0, 1, "true", {}, []):
+            value = copy.deepcopy(self.history)
+            value["boundary_migration"] = invalid
+            with self.assertRaises(ValueError):
+                self.settings(value)
+        value = copy.deepcopy(self.history)
+        value["boundary_migration"] = True
+        config = copy.deepcopy(self.fixture.config)
+        config["history"] = value
+        store = MemoryStore()
+        with patch("authorization_app.create_mcp", wraps=authorization_app.create_mcp) as mcp:
+            app = create_app(environ=self.fixture.environment(config), store_factory=lambda _: store,
+                history_source_factory=lambda *_: (Mock(), Mock()))
+        self.assertTrue(mcp.call_args.kwargs["history_boundary_migration"])
+        self.assertIsNotNone(app)
+        from runtime.authorization import AgentAuthorization, PublicClient
+        authority = AgentAuthorization(store, lambda _: None, issuer="https://expense.example.test",
+            tenant_id="expense-tenant", clients=(PublicClient("synthetic", "Synthetic",
+                ("https://sa.example.test/callback",), frozenset({"mf:read"})),))
+        for invalid in (True, "true", 1, None):
+            with self.assertRaisesRegex(ValueError, "History boundary migration"):
+                authorization_app.create_app(authority, Mock(), history_boundary_migration=invalid)
+
     def test_unknown_fields_widened_people_bad_keys_and_incomplete_optin_fail_before_store(self):
         variants = [None, {}, {"enabled": "true"}, {"enabled": False, "source_public_keys": "bad"}]
         for field in ("source_public_keys", "targets", "identity_links"):

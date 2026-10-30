@@ -23,8 +23,11 @@ class DraftConsentBinding:
     linkage fails closed. The UI selects one company, never all available ones.
     """
 
-    def __init__(self, authority, resolve):
+    def __init__(self, authority, resolve, *, consent_service=None):
         self.authority, self.resolve = authority, resolve
+        self.consent_service = consent_service or getattr(resolve, "consent_service", None)
+        if self.consent_service is not None and not callable(self.consent_service):
+            raise ValueError("Explicit trusted consent service callback required")
 
     def _pending(self, context, request_id, csrf_token=None):
         person = self.authority._login(context)
@@ -47,6 +50,12 @@ class DraftConsentBinding:
 
     def _service(self, person):
         try:
+            if self.consent_service is not None:
+                service = self.consent_service(person)
+                if (service.state.owner != person.owner or service.mf.owner != person.owner
+                        or service.write_enabled is not False):
+                    raise ExpenseError("初回許可には本人専用の読み取り接続が必要です。")
+                return service
             return RequesterDispatcher(
                 lambda _: person, self.resolve, clock=self.authority.clock
             )._service(None, "mf:draft")
@@ -56,7 +65,11 @@ class DraftConsentBinding:
     def choices(self, context, request_id):
         person = self._pending(context, request_id)
         try:
-            offices = self._service(person).call("mf_offices", {})
+            service = self._service(person)
+            offices = service.call("mf_offices", {})
+            allowed = getattr(service, "consent_office_ids", None)
+            if allowed is not None:
+                offices = [office for office in offices if office["id"] in allowed]
         except ExpenseError:
             raise AuthorizationError("draft_connection_required") from None
         if not offices or len(offices) > 50:

@@ -290,6 +290,9 @@ class State:
             if row[1] <= self.clock() or not row[3]:
                 raise ExpenseError("本人の有効な承認がありません。")
             fingerprint = snapshot.get("receipt_fingerprint")
+            expense_claim = fingerprint is None
+            if expense_claim:
+                fingerprint = snapshot.get("expense_fingerprint")
             if fingerprint is not None:
                 if (
                     action not in {"create", "upload"}
@@ -298,6 +301,8 @@ class State:
                     or any(c not in "0123456789abcdef" for c in fingerprint)
                 ):
                     raise ExpenseError("領収書の照合情報を確認してください。")
+                if expense_claim:
+                    fingerprint = "expense:" + fingerprint
                 prior = self.db.execute(
                     "SELECT p.status FROM receipt_claims c "
                     "LEFT JOIN previews p ON p.id=c.preview_id WHERE c.fingerprint=?",
@@ -306,11 +311,11 @@ class State:
                 if prior:
                     if prior[0] == "done":
                         raise ExpenseError(
-                            "同じ領収書は処理済みです。既存の明細・OCR結果を確認してください。"
+                            "同じ領収書または経費候補は処理済みです。既存の明細・OCR結果を確認してください。"
                             "新しいプレビューでも二重登録しません。"
                         )
                     raise OutcomeUnknownError(
-                        "同じ領収書の処理中または結果不明です。MF明細と照合してください。"
+                        "同じ領収書または経費候補の処理中または結果不明です。MF明細と照合してください。"
                         "新しいプレビューでも自動再送しません。"
                     )
                 self.db.execute(

@@ -54,6 +54,7 @@ class CloudAuthSettings:
     mf_secret: str = field(repr=False)
     google_secret: str = field(repr=False)
     history: object = field(default=None, repr=False)
+    business_factory: object = field(default=None, repr=False)
 
     def __repr__(self):
         return "CloudAuthSettings(<redacted>)"
@@ -73,7 +74,7 @@ def settings_from_environment(environ=None):
     try:
         config = json.loads(env["EXPENSE_AUTH_CONFIG"], object_pairs_hook=_unique_object)
         _fields(config, ("origin", "tenant_id", "platform_issuer", "platform_public_keys", "clients",
-                         "identity_links", "provider_namespace", "ingress_mode"), ("mf", "google", "history"))
+                         "identity_links", "provider_namespace", "ingress_mode"), ("mf", "google", "history", "business"))
         origin, issuer = _origin(config["origin"]), _origin(config["platform_issuer"])
         tenant = _text(config["tenant_id"])
         if config["ingress_mode"] not in ("cloud_run_tls", "asgi_tls"):
@@ -143,10 +144,17 @@ def settings_from_environment(environ=None):
             from runtime.cloud_history_config import parse_cloud_history
             history = parse_cloud_history(config["history"], audience=origin, tenant_id=tenant,
                                           allowed_people=people, platform_issuer=issuer)
+        business_factory = None
+        if "business" in config and not (
+            isinstance(config["business"], dict) and set(config["business"]) == {"enabled"}
+            and config["business"]["enabled"] is False
+        ):
+            from runtime.business_profile_config import prepare_business_profile
+            business_factory = prepare_business_profile(config["business"], environ=env, allowed_people=people)
         return CloudAuthSettings(
             PlatformAuthorizationHostSettings(origin, tenant, issuer, config["platform_public_keys"], tuple(clients), dsn),
             config["ingress_mode"], tuple(links), _text(config["provider_namespace"]),
-            providers["mf"], providers["google"], key, secrets["mf"], secrets["google"], history,
+            providers["mf"], providers["google"], key, secrets["mf"], secrets["google"], history, business_factory,
         )
     except Exception:
         raise ValueError("Invalid dedicated expense auth configuration") from None
@@ -206,10 +214,14 @@ class _CloudAuthApp:
         return await self.app(scope, receive, send)
 
 
-def create_app(*, environ=None, store_factory=None, history_source_factory=None):
+def create_app(*, environ=None, store_factory=None, history_source_factory=None, business_profile_factory=None):
     """Uvicorn factory; no secret reads or database access at module import."""
     logging.disable(logging.CRITICAL)
     settings = settings_from_environment(environ)
+    if business_profile_factory is None:
+        business_profile_factory = settings.business_factory
+    if business_profile_factory is not None and not callable(business_profile_factory):
+        raise ValueError("Explicit business profile factory required")
     real_source = settings.history.source_read if settings.history is not None else None
     if settings.history is not None and history_source_factory is not None and not callable(history_source_factory):
         raise ValueError("Enabled cloud history requires an explicit source adapter")
@@ -238,10 +250,25 @@ def create_app(*, environ=None, store_factory=None, history_source_factory=None)
         return resolver(person, capability) if resolver is not None else None
 
     resolve_connection.supported_operations = READ_OPERATIONS
+    def readiness_reason(person, capability):
+        resolver = execution.get("resolver")
+        return resolver.readiness_reason(person, capability) if resolver is not None else "unavailable"
+    resolve_connection.readiness_reason = readiness_reason
+    if business_profile_factory is not None:
+        def consent_service(person):
+            resolver = execution.get("resolver")
+            if resolver is None:
+                raise ValueError("Business profile is not ready")
+            return resolver.consent_service(person)
+        resolve_connection.consent_service = consent_service
 
     def bind_execution(store, providers):
         execution["resolver"] = ProviderExecutionResolver(
-            providers, store, settings.provider_namespace, tenant_id=settings.host.tenant_id)
+            providers, store, settings.provider_namespace, tenant_id=settings.host.tenant_id,
+            **({"profile": business_profile_factory(settings, store)} if business_profile_factory is not None else {}))
+        resolve_connection.supported_operations = execution["resolver"].supported_operations
+        if business_profile_factory is not None:
+            resolve_connection.receipt_resources = execution["resolver"].receipt_resources
 
     def connections(store):
         resources.append(store)
@@ -269,17 +296,19 @@ def create_app(*, environ=None, store_factory=None, history_source_factory=None)
 
     configured_store_factory = store_factory
     history_options = {}
-    if settings.history is not None:
+    if settings.history is not None or business_profile_factory is not None:
         from runtime.postgres_auth_store import PostgresAuthorizationStore
         def tracked_store_factory(dsn):
             store = (store_factory or PostgresAuthorizationStore)(dsn)
             resources.append(store)
             return store
         configured_store_factory = tracked_store_factory
+    if settings.history is not None:
         from runtime.cloud_history_config import build_cloud_history
         def history_factory(store):
             return build_cloud_history(settings.history, store, history_source_factory)
         history_options["history_factory"] = history_factory
+        history_options["history_boundary_migration"] = settings.history.boundary_migration
 
     try:
         app = create_platform_host(settings.host, resolve_person=settings.resolve_person,

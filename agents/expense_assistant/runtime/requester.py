@@ -176,7 +176,9 @@ class RequesterDispatcher:
         self.supported_operations = frozenset(getattr(resolve, "supported_operations", OPERATIONS))
         if not self.supported_operations <= OPERATIONS.keys():
             raise ValueError("Unknown supported expense operation")
-        self.receipt_resources = "mf_get_receipt" in self.supported_operations
+        self.receipt_resources = getattr(resolve, "receipt_resources", "mf_get_receipt" in self.supported_operations)
+        if type(self.receipt_resources) is not bool:
+            raise ValueError("Explicit receipt resource availability required")
 
     def available_operations(self, request_context):
         """Fresh catalog, intersect implementation, authority and provider grants.

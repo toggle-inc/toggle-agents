@@ -10,10 +10,11 @@ import asyncio
 import functools
 import hashlib
 import inspect
-from contextlib import ExitStack
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from contextvars import ContextVar
 
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.routing import Router
 from mcp_server import create_server
 from runtime.requester import RequesterDispatcher
 from runtime.service import ExpenseService
@@ -162,7 +163,37 @@ class _RequestService:
         return invoke
 
 
-def create_app(dispatcher, public_host, *, history_runtime=None, history_resolver=None):
+class _HistoryBoundaryMigration:
+    """Two independent stateless servers; proof presence never permits fallback."""
+
+    def __init__(self, legacy, strict):
+        self.legacy, self.strict = legacy, strict
+        # Keep the host's existing mcp.app.router.lifespan_context(mcp.app) API.
+        self.app = self
+        self.router = Router(lifespan=self._lifespan)
+
+    @asynccontextmanager
+    async def _lifespan(self, app):
+        async with AsyncExitStack() as stack:
+            for boundary in (self.legacy, self.strict):
+                await stack.enter_async_context(
+                    boundary.app.router.lifespan_context(boundary.app)
+                )
+            yield
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            return await self.router(scope, receive, send)
+        strict = any(
+            key.lower() in {b"x-agent-source-context", b"x-agent-execution-proof"}
+            for key, _ in scope.get("headers", ())
+        )
+        boundary = self.strict if strict else self.legacy
+        return await boundary(scope, receive, send)
+
+
+def create_app(dispatcher, public_host, *, history_runtime=None, history_resolver=None,
+               history_boundary_migration=False):
     """Configure the existing Engine external-OAuth MCP endpoint as this /mcp.
 
     The external OAuth issuer/consent UI is a separate prerequisite, not created
@@ -170,9 +201,15 @@ def create_app(dispatcher, public_host, *, history_runtime=None, history_resolve
     No disk credentials, live connections, or token issuers are supplied here.
     History is opt-in, with an agent-owned runtime and trusted per-request
     resolver supplied together. No request header can turn this option on.
+    Explicit history_boundary_migration=True retains a separate history-free
+    OAuth server for requests with neither proof header. Any proof header,
+    including empty/duplicate headers, selects strict verification only.
+    The default remains strict whenever history is configured.
     """
     if not isinstance(dispatcher, RequesterDispatcher):
         raise ExpenseError("本人別の認証・接続ディスパッチが必要です。")
+    if type(history_boundary_migration) is not bool:
+        raise ExpenseError("Explicit history boundary migration setting required")
     if (history_runtime is None) != (history_resolver is None):
         raise ExpenseError("履歴には検証済みの実行情報と読取接続の両方が必要です。")
     if history_runtime is not None:
@@ -187,6 +224,12 @@ def create_app(dispatcher, public_host, *, history_runtime=None, history_resolve
         or public_host.endswith((".", "-"))
     ):
         raise ExpenseError("HTTPS接続窓口の正確なホスト名を指定してください。")
+    if history_boundary_migration and history_runtime is not None:
+        return _HistoryBoundaryMigration(
+            create_app(dispatcher, public_host),
+            create_app(dispatcher, public_host, history_runtime=history_runtime,
+                       history_resolver=history_resolver),
+        )
     context = ContextVar("expense_authenticated_bearer", default=None)
     service = _RequestService(dispatcher, context)
     server = create_server(

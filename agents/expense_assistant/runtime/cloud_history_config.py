@@ -48,6 +48,7 @@ class CloudHistorySettings:
     targets: tuple
     identity_links: tuple = field(repr=False)
     source_read: SourceReadSettings | None = field(default=None, repr=False)
+    boundary_migration: bool = False
 
     def __repr__(self):
         return "CloudHistorySettings(<redacted>)"
@@ -73,10 +74,13 @@ def parse_cloud_history(value, *, audience, tenant_id, allowed_people, platform_
     try:
         if not isinstance(value, dict):
             raise ValueError
-        _fields({k: v for k, v in value.items() if k != "source_read"},
+        _fields({k: v for k, v in value.items() if k not in {"source_read", "boundary_migration"}},
                 ("enabled", "source_issuer", "source_public_keys", "execution_issuer",
                  "execution_public_keys", "targets", "identity_links"))
         if value["enabled"] is not True:
+            raise ValueError
+        boundary_migration = value.get("boundary_migration", False)
+        if type(boundary_migration) is not bool:
             raise ValueError
         source, execution, audience = (_origin(value["source_issuer"]),
                                        _origin(value["execution_issuer"]), _origin(audience))
@@ -127,7 +131,8 @@ def parse_cloud_history(value, *, audience, tenant_id, allowed_people, platform_
             source_read = SourceReadSettings(source, item["kid"], item["source_namespace"], item["source_actor"],
                                              read_target, tuple(item["agent_authors"]), SOURCE_READ_KEY_ENV)
         settings = CloudHistorySettings(source, value["source_public_keys"], execution,
-            value["execution_public_keys"], audience, tenant_id, tuple(targets), tuple(links), source_read)
+            value["execution_public_keys"], audience, tenant_id, tuple(targets), tuple(links), source_read,
+            boundary_migration)
         # Constructor parses pinned public keys and target trust only; no store or HTTP access.
         settings.verifier(None)
         return settings

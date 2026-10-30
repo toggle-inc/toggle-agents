@@ -1,8 +1,10 @@
 """All original expense operations behind one platform-independent service."""
 
 import collections
+import base64
 import datetime as dt
 import decimal
+import hashlib
 import inspect
 import re
 import threading
@@ -231,6 +233,30 @@ class ExpenseService:
             raise ExpenseError(f"{name}が未接続です。設定を確認してください。")
         return provider
 
+    def _receipt_identity(self, payload, reference):
+        """Keep immutable identity in the ledger, not a copy of the image bytes."""
+        content = base64.b64decode(payload["content"], validate=True)
+        return {**{k: v for k, v in payload.items() if k != "content"},
+                "content_sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content),
+                "receipt_reference": reference}
+
+    def _execution_payload(self, snapshot):
+        payload = dict(snapshot["payload"])
+
+        def restore(identity):
+            reference = identity["receipt_reference"]
+            actual = self._require(self.receipts, "領収書").payload(
+                reference, ocr=identity.get("process_type") == "2")
+            if self._receipt_identity(actual, reference) != identity:
+                raise ExpenseError("確認した領収書の内容が変わっています。再送せず照合してください。")
+            return actual
+
+        if "receipt_reference" in payload:
+            return restore(payload)
+        if isinstance(payload.get("receipt_input"), dict) and "receipt_reference" in payload["receipt_input"]:
+            payload["receipt_input"] = restore(payload["receipt_input"])
+        return payload
+
     def _verify_written_transaction(self, office, identifier, payload):
         """Read the exact personal record; a POST/PUT acknowledgement is not verification."""
         try:
@@ -415,11 +441,16 @@ class ExpenseService:
         has_receipt=False,
         own_count=0,
         other_count=0,
+        office="",
     ):
         dt.date.fromisoformat(recognized_at)
         if any(type(count) is not int or count < 0 for count in (own_count, other_count)):
             raise ExpenseError("出席者数を確認してください。")
-        return self._require(self.policy, "社内規則").check(
+        policy = self._require(self.policy, "社内規則")
+        allowed_offices = getattr(policy, "office_ids", None)
+        if allowed_offices is not None and office not in allowed_offices:
+            raise ExpenseError("認可済み規則を適用する会社IDを確認してください。別会社へは適用しません。")
+        return policy.check(
             recognized_at=recognized_at,
             value=amount(value, allow_zero=True),
             ex_item_name=ex_item_name,
@@ -441,6 +472,9 @@ class ExpenseService:
         return self._require(self.receipts, "領収書").save(content, mime)
 
     def _write(self, action, company, intent, prepare, execute, *, confirm, preview_id):
+        allowed_offices = getattr(self.policy, "office_ids", None) if self.policy is not None else None
+        if allowed_offices is not None and company["id"] not in allowed_offices:
+            raise ExpenseError("この会社の認可済み規則が未設定です。点検・登録は保留します。")
         if type(confirm) is not bool:
             raise ExpenseError("confirmは真偽値で指定してください。")
         if confirm:
@@ -451,6 +485,9 @@ class ExpenseService:
             completed = self.state.completed(preview_id, action, company["id"], intent)
             if completed is not None:
                 return completed
+        verify_policy = getattr(self.policy, "verify", None) if self.policy is not None else None
+        if callable(verify_policy):
+            verify_policy()
         snapshot, display = prepare()
         snapshot["intent"] = intent
         snapshot["office"] = {"id": company["id"], "name": company["name"]}
@@ -468,6 +505,8 @@ class ExpenseService:
                 and self.state.draft_consent(company["id"]) != expected_consent
             ):
                 raise ExpenseError("初回の許可が変更・解除されたため、保存を止めました。")
+            if callable(verify_policy):
+                verify_policy()
             return execute(snapshot)
 
         return self.state.execute(preview_id, action, company["id"], snapshot, run)
@@ -522,6 +561,7 @@ class ExpenseService:
                 bool(receipt_path),
                 own_count,
                 other_count,
+                office=company["id"],
             )
             payload = {
                 "recognized_at": recognized_at,
@@ -589,6 +629,11 @@ class ExpenseService:
                 snapshot["receipt_fingerprint"] = digest(
                     {key: payload["receipt_input"][key] for key in ("content", "content_type")}
                 )
+                snapshot["payload"] = {**payload, "receipt_input": self._receipt_identity(
+                    payload["receipt_input"], receipt_path)}
+            else:
+                snapshot["expense_fingerprint"] = digest({
+                    "domain": "expense-candidate/v1", "office": company["id"], "payload": payload})
             return snapshot, {
                 "preview": shown,
                 "office": company["name"],
@@ -600,12 +645,13 @@ class ExpenseService:
         def execute(snapshot):
             if not snapshot["form"]["ready"]:
                 raise ExpenseError("必須項目が不足しています。プレビューを修正してください。")
-            response = self.mf.create_transaction(company["id"], snapshot["payload"])
+            payload = self._execution_payload(snapshot)
+            response = self.mf.create_transaction(company["id"], payload)
             transaction = response.get("ex_transaction", response)
             if not transaction.get("id"):
                 raise OutcomeUnknownError("作成結果を確認できません。MF明細を照合してください。")
             transaction, verified = self._verify_written_transaction(
-                company["id"], transaction["id"], snapshot["payload"]
+                company["id"], transaction["id"], payload
             )
             return {
                 "created": True,
@@ -673,6 +719,7 @@ class ExpenseService:
                 payload.get("memo", before.get("memo", "")),
                 payload.get("report_number", before.get("report_number", "")),
                 bool(receipt_path or before.get("mf_file")),
+                office=company["id"],
             )
             snapshot = {
                 "before": compact(before),
@@ -683,6 +730,8 @@ class ExpenseService:
             shown = {key: val for key, val in payload.items() if key != "receipt_input"}
             if receipt_path:
                 shown["receipt"] = payload["receipt_input"]["filename"]
+                snapshot["payload"] = {**payload, "receipt_input": self._receipt_identity(
+                    payload["receipt_input"], receipt_path)}
             return snapshot, {
                 "preview": shown,
                 "transaction_id": transaction_id,
@@ -692,14 +741,15 @@ class ExpenseService:
             }
 
         def execute(snapshot):
+            payload = self._execution_payload(snapshot)
             response = self.mf.update_transaction(
-                company["id"], transaction_id, snapshot["payload"]
+                company["id"], transaction_id, payload
             )
             transaction = response.get("ex_transaction", response)
             if transaction.get("id") != transaction_id:
                 raise OutcomeUnknownError("更新結果を照合してください。")
             transaction, verified = self._verify_written_transaction(
-                company["id"], transaction_id, snapshot["payload"]
+                company["id"], transaction_id, payload
             )
             return {
                 "updated": True,
@@ -719,7 +769,8 @@ class ExpenseService:
         def prepare():
             payload = self._require(self.receipts, "領収書").payload(receipt_path, ocr=True)
             return {
-                "payload": payload,
+                "payload": self._receipt_identity(payload, receipt_path),
+                "policy_version": self.policy.version if self.policy is not None else None,
                 "receipt_fingerprint": digest(
                     {key: payload[key] for key in ("content", "content_type")}
                 ),
@@ -732,7 +783,7 @@ class ExpenseService:
             return {
                 "uploaded": True,
                 "ocr_pending": True,
-                "result": self.mf.upload_receipt(company["id"], snapshot["payload"]),
+                "result": self.mf.upload_receipt(company["id"], self._execution_payload(snapshot)),
             }
 
         return self._write(
@@ -961,7 +1012,7 @@ class ExpenseService:
             ),
             "suggestion_due": self.state.suggestion_due(),
             "capabilities": {
-                "mf_configured": True,
+                "mf_configured": getattr(self.mf, "configured", True),
                 "calendar": self.calendar is not None,
                 "fare": self.fares is not None,
                 "receipts": self.receipts is not None,

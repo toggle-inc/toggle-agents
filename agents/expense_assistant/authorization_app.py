@@ -106,6 +106,7 @@ def create_app(
     platform_login=None,
     service_connections=None,
     history_factory=None,
+    history_boundary_migration=False,
 ):
     """Host supplies SSO verification + private storage/providers, not auth logic.
 
@@ -118,6 +119,9 @@ def create_app(
     """
     if not isinstance(authority, AgentAuthorization):
         raise ValueError("Agent-owned authority is required")
+    if (type(history_boundary_migration) is not bool
+            or (history_boundary_migration and history_factory is None)):
+        raise ValueError("History boundary migration requires explicit configured history")
     if draft_consent is not None:
         from runtime.draft_consent import DraftConsentBinding
 
@@ -164,6 +168,8 @@ def create_app(
         if not isinstance(pair, tuple) or len(pair) != 2 or any(v is None for v in pair):
             raise ValueError("Explicit history runtime and resolver required")
         history_options = {"history_runtime": pair[0], "history_resolver": pair[1]}
+        if history_boundary_migration:
+            history_options["history_boundary_migration"] = True
     mcp = create_mcp(dispatcher, urlsplit(origin).hostname, **history_options)
 
     async def endpoint(request):
