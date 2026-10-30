@@ -1,8 +1,10 @@
 """All original expense operations behind one platform-independent service."""
 
 import collections
+import base64
 import datetime as dt
 import decimal
+import hashlib
 import inspect
 import re
 import threading
@@ -155,6 +157,10 @@ class ExpenseService:
         aliases=None,
         references=None,
         write_enabled=False,
+        receipt_ocr=None,
+        receipt_drafts=None,
+        receipt_company=None,
+        memory_write_enabled=False,
     ):
         if getattr(mf, "owner", None) != state.owner:
             raise ExpenseError("MF認証と状態の本人が一致しません。")
@@ -162,6 +168,9 @@ class ExpenseService:
         self.calendar, self.fares, self.receipts, self.policy = calendar, fares, receipts, policy
         self.aliases, self.references = aliases or {}, references
         self.write_enabled = write_enabled is True
+        self.memory_write_enabled = memory_write_enabled is True
+        self.receipt_ocr, self.receipt_drafts = receipt_ocr, receipt_drafts
+        self.receipt_company = receipt_company
         self._lock = threading.RLock()
         self._draft_guard = ContextVar("expense_draft_consent", default=None)
 
@@ -170,9 +179,11 @@ class ExpenseService:
             "delivery_contract",
             "expense_context",
             "propose_teaching",
+            "remember_teaching",
             "read_reference",
             "mf_receipt_status",
             "mf_save_draft",
+            "prepare_receipt_draft",
         )
         if operation not in operations or not isinstance(arguments, dict):
             raise ExpenseError("未対応の経費操作です。")
@@ -230,6 +241,30 @@ class ExpenseService:
         if provider is None:
             raise ExpenseError(f"{name}が未接続です。設定を確認してください。")
         return provider
+
+    def _receipt_identity(self, payload, reference):
+        """Keep immutable identity in the ledger, not a copy of the image bytes."""
+        content = base64.b64decode(payload["content"], validate=True)
+        return {**{k: v for k, v in payload.items() if k != "content"},
+                "content_sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content),
+                "receipt_reference": reference}
+
+    def _execution_payload(self, snapshot):
+        payload = dict(snapshot["payload"])
+
+        def restore(identity):
+            reference = identity["receipt_reference"]
+            actual = self._require(self.receipts, "領収書").payload(
+                reference, ocr=identity.get("process_type") == "2")
+            if self._receipt_identity(actual, reference) != identity:
+                raise ExpenseError("確認した領収書の内容が変わっています。再送せず照合してください。")
+            return actual
+
+        if "receipt_reference" in payload:
+            return restore(payload)
+        if isinstance(payload.get("receipt_input"), dict) and "receipt_reference" in payload["receipt_input"]:
+            payload["receipt_input"] = restore(payload["receipt_input"])
+        return payload
 
     def _verify_written_transaction(self, office, identifier, payload):
         """Read the exact personal record; a POST/PUT acknowledgement is not verification."""
@@ -415,11 +450,16 @@ class ExpenseService:
         has_receipt=False,
         own_count=0,
         other_count=0,
+        office="",
     ):
         dt.date.fromisoformat(recognized_at)
         if any(type(count) is not int or count < 0 for count in (own_count, other_count)):
             raise ExpenseError("出席者数を確認してください。")
-        return self._require(self.policy, "社内規則").check(
+        policy = self._require(self.policy, "社内規則")
+        allowed_offices = getattr(policy, "office_ids", None)
+        if allowed_offices is not None and office not in allowed_offices:
+            raise ExpenseError("認可済み規則を適用する会社IDを確認してください。別会社へは適用しません。")
+        return policy.check(
             recognized_at=recognized_at,
             value=amount(value, allow_zero=True),
             ex_item_name=ex_item_name,
@@ -435,12 +475,51 @@ class ExpenseService:
     def fetch_attachment(self, url):
         return self._require(self.receipts, "添付ファイル").fetch_attachment(url)
 
+    def prepare_receipt_draft(self, attachment_id=""):
+        """Read the verified source image and prepare a local, unsubmitted draft.
+
+        Company rules come from trusted agent configuration, never tool text.
+        This operation never calls an MF write or uploads an image to MF.
+        """
+        files = self._require(self.receipts, "添付ファイル")
+        reader = self._require(self.receipt_ocr, "画像の文字認識")
+        builder = self._require(self.receipt_drafts, "会社別の経費ルール")
+        if not self.receipt_company or files.fetcher is None:
+            raise ExpenseError("本人に適用する会社・添付接続を確認してください。")
+        source_reader = getattr(files.fetcher, "read_for_draft", None)
+        if callable(source_reader):
+            content, mime, manifest = source_reader(attachment_id)
+            receipt = files.save(content, mime)
+        else:
+            manifest = files.fetcher.manifest()
+            items = manifest["attachments"]
+            if not attachment_id:
+                if len(items) != 1:
+                    raise ExpenseError("領収書を1枚添付するか、対象の添付IDを指定してください。")
+                attachment_id = items[0]["id"]
+            if not isinstance(attachment_id, str) or not any(v["id"] == attachment_id for v in items):
+                raise ExpenseError("この依頼に添付された領収書を指定してください。")
+            receipt = files.fetch_attachment("attachment:" + attachment_id)
+        payload = files.payload(receipt["path"])
+        extracted = reader.read(base64.b64decode(payload["content"], validate=True), payload["content_type"])
+        draft = builder.build(extracted, receipt["path"], self.receipt_company)
+        # Recheck the current source/ACL after OCR, not merely before reading.
+        current = files.fetcher.manifest()
+        stable = ("schemaVersion", "invocationId", "sourceMessageId", "attachments", "manifestSha256")
+        if any(current.get(k) != manifest.get(k) for k in stable):
+            raise ExpenseError("添付の権限または内容が変わりました。再確認してください。")
+        preview = self.state.preview("receipt_draft", self.receipt_company, draft)
+        return {**draft, **preview, "mf_registered": False, "submitted": False}
+
     def mf_get_receipt(self, office, transaction_id):
         company = self._office(office)
         content, mime = self.mf.download_receipt(company["id"], transaction_id)
         return self._require(self.receipts, "領収書").save(content, mime)
 
     def _write(self, action, company, intent, prepare, execute, *, confirm, preview_id):
+        allowed_offices = getattr(self.policy, "office_ids", None) if self.policy is not None else None
+        if allowed_offices is not None and company["id"] not in allowed_offices:
+            raise ExpenseError("この会社の認可済み規則が未設定です。点検・登録は保留します。")
         if type(confirm) is not bool:
             raise ExpenseError("confirmは真偽値で指定してください。")
         if confirm:
@@ -451,6 +530,9 @@ class ExpenseService:
             completed = self.state.completed(preview_id, action, company["id"], intent)
             if completed is not None:
                 return completed
+        verify_policy = getattr(self.policy, "verify", None) if self.policy is not None else None
+        if callable(verify_policy):
+            verify_policy()
         snapshot, display = prepare()
         snapshot["intent"] = intent
         snapshot["office"] = {"id": company["id"], "name": company["name"]}
@@ -468,6 +550,8 @@ class ExpenseService:
                 and self.state.draft_consent(company["id"]) != expected_consent
             ):
                 raise ExpenseError("初回の許可が変更・解除されたため、保存を止めました。")
+            if callable(verify_policy):
+                verify_policy()
             return execute(snapshot)
 
         return self.state.execute(preview_id, action, company["id"], snapshot, run)
@@ -522,6 +606,7 @@ class ExpenseService:
                 bool(receipt_path),
                 own_count,
                 other_count,
+                office=company["id"],
             )
             payload = {
                 "recognized_at": recognized_at,
@@ -589,6 +674,11 @@ class ExpenseService:
                 snapshot["receipt_fingerprint"] = digest(
                     {key: payload["receipt_input"][key] for key in ("content", "content_type")}
                 )
+                snapshot["payload"] = {**payload, "receipt_input": self._receipt_identity(
+                    payload["receipt_input"], receipt_path)}
+            else:
+                snapshot["expense_fingerprint"] = digest({
+                    "domain": "expense-candidate/v1", "office": company["id"], "payload": payload})
             return snapshot, {
                 "preview": shown,
                 "office": company["name"],
@@ -600,12 +690,13 @@ class ExpenseService:
         def execute(snapshot):
             if not snapshot["form"]["ready"]:
                 raise ExpenseError("必須項目が不足しています。プレビューを修正してください。")
-            response = self.mf.create_transaction(company["id"], snapshot["payload"])
+            payload = self._execution_payload(snapshot)
+            response = self.mf.create_transaction(company["id"], payload)
             transaction = response.get("ex_transaction", response)
             if not transaction.get("id"):
                 raise OutcomeUnknownError("作成結果を確認できません。MF明細を照合してください。")
             transaction, verified = self._verify_written_transaction(
-                company["id"], transaction["id"], snapshot["payload"]
+                company["id"], transaction["id"], payload
             )
             return {
                 "created": True,
@@ -673,6 +764,7 @@ class ExpenseService:
                 payload.get("memo", before.get("memo", "")),
                 payload.get("report_number", before.get("report_number", "")),
                 bool(receipt_path or before.get("mf_file")),
+                office=company["id"],
             )
             snapshot = {
                 "before": compact(before),
@@ -683,6 +775,8 @@ class ExpenseService:
             shown = {key: val for key, val in payload.items() if key != "receipt_input"}
             if receipt_path:
                 shown["receipt"] = payload["receipt_input"]["filename"]
+                snapshot["payload"] = {**payload, "receipt_input": self._receipt_identity(
+                    payload["receipt_input"], receipt_path)}
             return snapshot, {
                 "preview": shown,
                 "transaction_id": transaction_id,
@@ -692,14 +786,15 @@ class ExpenseService:
             }
 
         def execute(snapshot):
+            payload = self._execution_payload(snapshot)
             response = self.mf.update_transaction(
-                company["id"], transaction_id, snapshot["payload"]
+                company["id"], transaction_id, payload
             )
             transaction = response.get("ex_transaction", response)
             if transaction.get("id") != transaction_id:
                 raise OutcomeUnknownError("更新結果を照合してください。")
             transaction, verified = self._verify_written_transaction(
-                company["id"], transaction_id, snapshot["payload"]
+                company["id"], transaction_id, payload
             )
             return {
                 "updated": True,
@@ -719,7 +814,8 @@ class ExpenseService:
         def prepare():
             payload = self._require(self.receipts, "領収書").payload(receipt_path, ocr=True)
             return {
-                "payload": payload,
+                "payload": self._receipt_identity(payload, receipt_path),
+                "policy_version": self.policy.version if self.policy is not None else None,
                 "receipt_fingerprint": digest(
                     {key: payload[key] for key in ("content", "content_type")}
                 ),
@@ -732,7 +828,7 @@ class ExpenseService:
             return {
                 "uploaded": True,
                 "ocr_pending": True,
-                "result": self.mf.upload_receipt(company["id"], snapshot["payload"]),
+                "result": self.mf.upload_receipt(company["id"], self._execution_payload(snapshot)),
             }
 
         return self._write(
@@ -917,6 +1013,15 @@ class ExpenseService:
                 self.state.withdraw_unused_approval(preview_id)
             return {
                 **result,
+                "reply_text": (
+                    "MFに未提出の経費明細を保存しました。\n"
+                    "[MFで下書きを確認](https://expense.moneyforward.com/transactions)\n"
+                    "MFの会社選択を確認し、内容をご確認ください。申請はまだ提出していません。"
+                    if details["action"] == "create" else
+                    "領収書のOCR処理をMFへ依頼しました（読取・明細保存の完了は未確認です）。\n"
+                    "[MFで読取状況を確認](https://expense.moneyforward.com/transactions)\n"
+                    "MFの会社選択も確認してください。申請はまだ提出していません。"
+                ),
                 "review_url": "https://expense.moneyforward.com/transactions",
                 "review_link_kind": "transaction_list",
                 "review_company": (details["snapshot"].get("office") or {}).get(
@@ -955,13 +1060,14 @@ class ExpenseService:
 
     def expense_context(self):
         return {
-            "teachings": self.state.facts(),
+            "teachings": self.state.active_facts(),
+            "teachings_untrusted_data": True,
             "pending_due": self.state.due_pending(
                 dt.datetime.fromtimestamp(self.state.clock(), ZoneInfo("Asia/Tokyo")).date()
             ),
             "suggestion_due": self.state.suggestion_due(),
             "capabilities": {
-                "mf_configured": True,
+                "mf_configured": getattr(self.mf, "configured", True),
                 "calendar": self.calendar is not None,
                 "fare": self.fares is not None,
                 "receipts": self.receipts is not None,
@@ -987,6 +1093,12 @@ class ExpenseService:
 
     def propose_teaching(self, kind, content, due_date=""):
         return self.state.propose_fact(kind, content, due_date)
+
+    def remember_teaching(self, kind, content, due_date=""):
+        """Save useful personal facts under current initial memory:write consent."""
+        if not self.memory_write_enabled:
+            raise ExpenseError("会話から記憶を保存する初回の利用許可が必要です。候補作成の許可では保存できません。")
+        return {**self.state.remember_fact(kind, content, due_date), "saved": True}
 
     def read_reference(self, relative="index.md"):
         if self.references is None:

@@ -5,6 +5,7 @@ import functools
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -26,6 +27,58 @@ def digest(value):
             value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False
         ).encode()
     ).hexdigest()
+
+
+def _memory_values(kind, content, due_date=""):
+    """Shared proposal/GUI validation; never relax the existing privacy filter."""
+    if (not isinstance(kind, str)
+            or kind not in {"commuter_pass", "base_location", "formatting", "pending", "preference"}
+            or not isinstance(content, str) or not 1 <= len(content) <= 1000):
+        raise ExpenseError("記憶の種類または長さが不正です。")
+    if due_date is not None and not isinstance(due_date, str):
+        raise ExpenseError("確認予定日の形式が不正です。")
+    if kind == "pending":
+        try:
+            due_date = dt.date.fromisoformat(due_date).isoformat()
+        except (TypeError, ValueError):
+            raise ExpenseError("保留には確認予定日が必要です。") from None
+    elif due_date:
+        raise ExpenseError("確認予定日は保留にだけ指定できます。")
+    if re.search(r"(?i)token|password|secret|認可コード|パスワード|口座|秘密|sk-[\w-]+|"
+                 r"https?://|[\w.+-]+@[\w.-]+|\b\d{10,}\b", content):
+        raise ExpenseError("秘密・口座・個人情報を記憶できません。一般的な決まりに言い換えてください。")
+    return {"kind": kind, "content": content, "due_date": due_date or None}
+
+
+def _memory_entry(row, scope):
+    """Host-only, detached GUI view. Digest is opaque and includes private scope."""
+    entry = {key: row[key] for key in ("id", "kind", "content", "status", "due_date")}
+    return {**entry, "digest": digest({"scope": scope, "entry": entry})}
+
+
+def _remember_identifier(values, scope):
+    # Content-derived personal ID is a durable replay fence. GUI edits keep
+    # this ID; deletion retains only the ID and cannot be undone by retry.
+    return digest({"domain": "expense-remember/v1", "scope": scope, "values": values})[:32]
+
+
+def _remember_result(row, values):
+    if (row["status"] != "active"
+            or any(row.get(key) != value for key, value in values.items())):
+        raise ExpenseError("この記憶は変更・無効化・削除されています。再保存せず記憶管理画面で確認してください。")
+    return {key: row[key] for key in ("id", "kind", "content", "status", "due_date")}
+
+
+def _memory_claim_key(values, scope):
+    # No plaintext is retained in replay metadata, including after GUI deletion.
+    return "memory_content_claim:" + _remember_identifier(values, scope)
+
+
+def _check_memory(row, expected_digest, scope, allowed_statuses):
+    if (not row or row["status"] not in allowed_statuses
+            or not isinstance(expected_digest, str)
+            or _memory_entry(row, scope)["digest"] != expected_digest):
+        raise ExpenseError("記憶の内容・状態が変わりました。最新の一覧を確認してください。")
 
 
 def synchronized(function):
@@ -51,7 +104,9 @@ class State:
         os.close(descriptor)
         os.chmod(path, 0o600)
         self.db = sqlite3.connect(path, isolation_level=None, timeout=15, check_same_thread=False)
+        self._memory_scope = ["expense-sqlite-memory/v1", str(path.resolve()), owner]
         self.db.execute("PRAGMA journal_mode=DELETE")
+        self.db.execute("PRAGMA secure_delete=ON")
         self.db.execute("CREATE TABLE IF NOT EXISTS binding (owner TEXT NOT NULL)")
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -290,6 +345,9 @@ class State:
             if row[1] <= self.clock() or not row[3]:
                 raise ExpenseError("本人の有効な承認がありません。")
             fingerprint = snapshot.get("receipt_fingerprint")
+            expense_claim = fingerprint is None
+            if expense_claim:
+                fingerprint = snapshot.get("expense_fingerprint")
             if fingerprint is not None:
                 if (
                     action not in {"create", "upload"}
@@ -298,6 +356,8 @@ class State:
                     or any(c not in "0123456789abcdef" for c in fingerprint)
                 ):
                     raise ExpenseError("領収書の照合情報を確認してください。")
+                if expense_claim:
+                    fingerprint = "expense:" + fingerprint
                 prior = self.db.execute(
                     "SELECT p.status FROM receipt_claims c "
                     "LEFT JOIN previews p ON p.id=c.preview_id WHERE c.fingerprint=?",
@@ -306,11 +366,11 @@ class State:
                 if prior:
                     if prior[0] == "done":
                         raise ExpenseError(
-                            "同じ領収書は処理済みです。既存の明細・OCR結果を確認してください。"
+                            "同じ領収書または経費候補は処理済みです。既存の明細・OCR結果を確認してください。"
                             "新しいプレビューでも二重登録しません。"
                         )
                     raise OutcomeUnknownError(
-                        "同じ領収書の処理中または結果不明です。MF明細と照合してください。"
+                        "同じ領収書または経費候補の処理中または結果不明です。MF明細と照合してください。"
                         "新しいプレビューでも自動再送しません。"
                     )
                 self.db.execute(
@@ -352,55 +412,153 @@ class State:
 
     @synchronized
     def propose_fact(self, kind, content, due_date=""):
-        allowed = {"commuter_pass", "base_location", "formatting", "pending", "preference"}
-        if kind not in allowed or not isinstance(content, str) or not 1 <= len(content) <= 1000:
-            raise ExpenseError("記憶の種類または長さが不正です。")
-        if kind == "pending":
-            try:
-                due_date = dt.date.fromisoformat(due_date).isoformat()
-            except (TypeError, ValueError) as error:
-                raise ExpenseError("保留には確認予定日が必要です。") from error
-        elif due_date:
-            raise ExpenseError("確認予定日は保留にだけ指定できます。")
-        import re
-
-        if re.search(
-            r"(?i)token|password|secret|認可コード|パスワード|口座|秘密|sk-[\w-]+|"
-            r"https?://|[\w.+-]+@[\w.-]+|\b\d{10,}\b",
-            content,
-        ):
-            raise ExpenseError(
-                "秘密・口座・個人情報を記憶できません。一般的な決まりに言い換えてください。"
-            )
+        values = _memory_values(kind, content, due_date)
         identifier = uuid.uuid4().hex
         self.db.execute(
             "INSERT INTO facts (id,kind,content,status,created,due_date) "
             "VALUES (?,?,?,'proposed',?,?)",
-            (identifier, kind, content, self.clock(), due_date or None),
+            (identifier, kind, content, self.clock(), values["due_date"]),
         )
         return {"id": identifier, "kind": kind, "content": content, "status": "proposed"}
 
     @synchronized
     def accept_fact(self, identifier):
         """Trusted human confirmation only, not an agent-callable operation."""
-        changed = self.db.execute(
-            "UPDATE facts SET status='active' WHERE id=? AND status='proposed'", (identifier,)
-        ).rowcount
-        if not changed:
-            raise ExpenseError("記憶の確認対象が見つかりません。")
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            raw = self.db.execute("SELECT kind,content,due_date FROM facts WHERE id=? AND status='proposed'",
+                                  (identifier,)).fetchone()
+            if not raw:
+                raise ExpenseError("記憶の確認対象が見つかりません。")
+            self._claim_memory(identifier, dict(zip(("kind", "content", "due_date"), raw)))
+            self.db.execute("UPDATE facts SET status='active' WHERE id=?", (identifier,))
+            self.db.execute("COMMIT")
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def _claim_memory(self, identifier, values):
+        """Called only inside the same transaction as creation/GUI mutation."""
+        key = _memory_claim_key(values, self._memory_scope)
+        self.db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (key, json.dumps(identifier)))
+
+    @synchronized
+    def remember_fact(self, kind, content, due_date=""):
+        """Current memory:write host only; independent of proposal approval.
+
+        Atomically create/replay one active fact per exact validated value tuple.
+        Never update an existing fact or revive its tombstone. Capability checks
+        belong to the authenticated service/dispatcher, not this storage layer.
+        """
+        values = _memory_values(kind, content, due_date)
+        identifier = _remember_identifier(values, self._memory_scope)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            claim = self.db.execute("SELECT value FROM settings WHERE key=?",
+                                    (_memory_claim_key(values, self._memory_scope),)).fetchone()
+            if claim:
+                identifier = json.loads(claim[0])
+            else:
+                # Adopt previously confirmed legacy IDs; never auto-approve a
+                # proposed record. New automatic saves have their own active ID.
+                prior = self.db.execute("SELECT id FROM facts WHERE kind=? AND content=? "
+                                        "AND due_date IS ? AND status IN ('active','retired','done') "
+                                        "ORDER BY created,id LIMIT 1",
+                                        (kind, content, values["due_date"])).fetchone()
+                if prior:
+                    identifier = prior[0]
+            raw = self.db.execute("SELECT id,kind,content,status,due_date FROM facts WHERE id=?",
+                                  (identifier,)).fetchone()
+            if raw:
+                row = dict(zip(("id", "kind", "content", "status", "due_date"), raw))
+            else:
+                if claim:
+                    raise ExpenseError("記憶の保存状態を確認してください。再作成はしません。")
+                row = {"id": identifier, **values, "status": "active"}
+                self.db.execute("INSERT INTO facts (id,kind,content,status,created,due_date) VALUES (?,?,?,?,?,?)",
+                                (identifier, kind, content, "active", self.clock(), values["due_date"]))
+            result = _remember_result(row, values)
+            self._claim_memory(identifier, values)
+            self.db.execute("COMMIT")
+            return result
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
 
     @synchronized
     def facts(self):
         rows = self.db.execute(
-            "SELECT id,kind,content,status,due_date FROM facts ORDER BY created,id"
+            "SELECT id,kind,content,status,due_date FROM facts WHERE status!='deleted' ORDER BY created,id"
         )
         return [dict(zip(("id", "kind", "content", "status", "due_date"), row)) for row in rows]
+
+    @synchronized
+    def memory_entries(self):
+        """Trusted GUI host only; authenticate owner/CSRF/expiry before calling."""
+        return [_memory_entry(row, self._memory_scope) for row in self.facts()]
+
+    @synchronized
+    def _change_memory(self, identifier, expected_digest, action, values=None):
+        # BEGIN IMMEDIATE serializes the read + digest check + mutation across
+        # separate State instances/connections, not just this instance's lock.
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            raw = self.db.execute(
+                "SELECT id,kind,content,status,due_date FROM facts WHERE id=?", (identifier,)
+            ).fetchone()
+            row = dict(zip(("id", "kind", "content", "status", "due_date"), raw)) if raw else None
+            allowed = {"proposed"} if action == "confirm" else {"active"} if action == "update" else {
+                "proposed", "active", "retired", "done"}
+            _check_memory(row, expected_digest, self._memory_scope, allowed)
+            # Cover legacy random IDs and retain the old content's replay fence
+            # when an active item is edited or its plaintext is erased.
+            self._claim_memory(identifier, {key: row[key] for key in ("kind", "content", "due_date")})
+            if action == "delete":
+                # Schema-compatible tombstone: no original kind/content/date or
+                # creation timestamp is retained. The NOT NULL columns are empty.
+                self.db.execute("UPDATE facts SET kind='',content='',status='deleted',created=0,due_date=NULL WHERE id=?",
+                                (identifier,))
+                result = {"id": identifier, "status": "deleted"}
+            else:
+                if action == "confirm":
+                    row["status"] = "active"
+                else:
+                    row.update(values)
+                    self._claim_memory(identifier, values)
+                self.db.execute("UPDATE facts SET kind=?,content=?,status=?,due_date=? WHERE id=?",
+                                (row["kind"], row["content"], row["status"], row["due_date"], identifier))
+                result = _memory_entry(row, self._memory_scope)
+            self.db.execute("COMMIT")
+            return result
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def confirm_memory(self, identifier, expected_digest):
+        """Trusted GUI only. CAS-confirm a proposed item; never an LLM tool."""
+        return self._change_memory(identifier, expected_digest, "confirm")
+
+    def update_memory(self, identifier, expected_digest, kind, content, due_date=""):
+        """Trusted GUI only. Edit an active item in place using its exact digest."""
+        return self._change_memory(identifier, expected_digest, "update", _memory_values(kind, content, due_date))
+
+    def delete_memory(self, identifier, expected_digest):
+        """Trusted GUI only. CAS-remove content; a deleted ID cannot be revived."""
+        return self._change_memory(identifier, expected_digest, "delete")
+
+    @synchronized
+    def active_facts(self):
+        """Conversation input: approved active facts only, never GUI digests."""
+        return [row for row in self.facts() if row["status"] == "active"]
 
     @synchronized
     def due_pending(self, today):
         return [
             fact
-            for fact in self.facts()
+            for fact in self.active_facts()
             if fact["kind"] == "pending"
             and fact["status"] == "active"
             and fact["due_date"]
@@ -410,7 +568,7 @@ class State:
     @synchronized
     def retire_fact(self, identifier):
         """Trusted human action. Keep history instead of deleting it."""
-        self.db.execute("UPDATE facts SET status='retired' WHERE id=?", (identifier,))
+        self.db.execute("UPDATE facts SET status='retired' WHERE id=? AND status!='deleted'", (identifier,))
 
     @synchronized
     def complete_pending(self, identifier):

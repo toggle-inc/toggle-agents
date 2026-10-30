@@ -6,11 +6,15 @@ callback verifies the resource-specific per-person Bearer token on EVERY call.
 Never pass the legacy owner key or a tenant-wide Engine execution JWT here.
 """
 
+import asyncio
 import functools
+import hashlib
 import inspect
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from contextvars import ContextVar
 
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.routing import Router
 from mcp_server import create_server
 from runtime.requester import RequesterDispatcher
 from runtime.service import ExpenseService
@@ -20,8 +24,51 @@ from runtime.state import ExpenseError
 class RequestAuthorization:
     """Pure ASGI middleware, with an isolated context for each HTTP request."""
 
-    def __init__(self, app, dispatcher, context):
+    def __init__(self, app, dispatcher, context, *, history_runtime=None, history_resolver=None,
+                 history_target=None):
         self.app, self.dispatcher, self.context = app, dispatcher, context
+        self.history_runtime, self.history_resolver = history_runtime, history_resolver
+        self.history_target = history_target
+        if history_runtime is not None and history_target is None:
+            raise ExpenseError("A fixed history resource target is required")
+
+    async def _history_request(self, scope, receive):
+        """Bind exact bytes before the trusted verifier; never log the body."""
+        from _foundation.execution_binding import ExecutionRequest
+
+        if (scope.get("method") not in {"GET", "POST", "DELETE"}
+                or scope.get("path") != "/mcp" or scope.get("query_string", b"")
+                or scope.get("raw_path", b"/mcp") != b"/mcp"):
+            raise ExpenseError("Invalid history request")
+        parts, size = [], 0
+        async with asyncio.timeout(10):
+            while True:
+                event = await receive()
+                if event.get("type") != "http.request" or not isinstance(event.get("body", b""), bytes):
+                    raise ExpenseError("Invalid history request")
+                body = event.get("body", b"")
+                size += len(body)
+                if size > 262144:
+                    raise ExpenseError("Invalid history request")
+                parts.append(body)
+                if not event.get("more_body", False):
+                    break
+        data = b"".join(parts)
+        received = False
+
+        async def replay_receive():
+            nonlocal received
+            if not received:
+                received = True
+                return {"type": "http.request", "body": data, "more_body": False}
+            return await receive()
+
+        return {
+            **scope,
+            "agent_execution_request": ExecutionRequest(
+                scope["method"], self.history_target, hashlib.sha256(data).hexdigest()
+            ),
+        }, replay_receive
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -29,7 +76,18 @@ class RequestAuthorization:
         if scope["type"] != "http":
             await send({"type": "websocket.close", "code": 1008})
             return
+        if self.history_runtime is not None:
+            from runtime.external_history_resolver import ExternalHistoryResolver
+            if isinstance(self.history_resolver, ExternalHistoryResolver):
+                # Do not inherit a parent's capability while authenticating a
+                # nested/copied request, including its failure response.
+                with self.history_resolver.binding_context.unbound():
+                    return await self._authorized_http(scope, receive, send)
+        return await self._authorized_http(scope, receive, send)
+
+    async def _authorized_http(self, scope, receive, send):
         values = [v for k, v in scope.get("headers", ()) if k.lower() == b"authorization"]
+        history_scope = ExitStack()
         try:
             if len(values) != 1 or not values[0].startswith(b"Bearer "):
                 raise ExpenseError("Missing personal authorization")
@@ -37,8 +95,24 @@ class RequestAuthorization:
             if not 1 <= len(credential) <= 8192 or any(c <= 32 or c >= 127 for c in credential):
                 raise ExpenseError("Invalid personal authorization")
             token = credential.decode("ascii")
-            self.dispatcher.validate_request(token)
+            person = self.dispatcher.validate_request(token)
+            if self.history_runtime is not None:
+                from runtime.history_request import HistoryRequestBinding
+                from runtime.external_history_resolver import ExternalHistoryResolver
+                try:
+                    verified_scope, receive = await self._history_request(scope, receive)
+                    binding = self.history_resolver(verified_scope, person)
+                    if not isinstance(binding, HistoryRequestBinding) or not binding.matches(person):
+                        raise ExpenseError("Invalid history binding")
+                    history_scope.enter_context(self.history_runtime.bind(binding.invocation))
+                    if isinstance(self.history_resolver, ExternalHistoryResolver):
+                        history_scope.enter_context(
+                            self.history_resolver.binding_context.bind(binding, person)
+                        )
+                except Exception:
+                    raise ExpenseError("Invalid history binding") from None
         except ExpenseError:
+            history_scope.close()
             await send(
                 {
                     "type": "http.response.start",
@@ -52,6 +126,9 @@ class RequestAuthorization:
             )
             await send({"type": "http.response.body", "body": b"Unauthorized"})
             return
+        except BaseException:
+            history_scope.close()
+            raise
         handle = self.context.set(token)
 
         async def private_send(message):
@@ -71,6 +148,7 @@ class RequestAuthorization:
             return await self.app(scope, receive, private_send)
         finally:
             self.context.reset(handle)
+            history_scope.close()
 
 
 class _RequestService:
@@ -103,15 +181,65 @@ class _RequestService:
         return invoke
 
 
-def create_app(dispatcher, public_host):
+class _HistoryBoundaryMigration:
+    """Two independent stateless servers; proof presence never permits fallback."""
+
+    def __init__(self, legacy, strict):
+        self.legacy, self.strict = legacy, strict
+        # Keep the host's existing mcp.app.router.lifespan_context(mcp.app) API.
+        self.app = self
+        self.router = Router(lifespan=self._lifespan)
+
+    @asynccontextmanager
+    async def _lifespan(self, app):
+        async with AsyncExitStack() as stack:
+            for boundary in (self.legacy, self.strict):
+                await stack.enter_async_context(
+                    boundary.app.router.lifespan_context(boundary.app)
+                )
+            yield
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            return await self.router(scope, receive, send)
+        strict = any(
+            key.lower() in {b"x-agent-source-context", b"x-agent-execution-proof"}
+            for key, _ in scope.get("headers", ())
+        )
+        boundary = self.strict if strict else self.legacy
+        if not strict:
+            from runtime.external_history_resolver import ExternalHistoryResolver
+            resolver = self.strict.history_resolver
+            if isinstance(resolver, ExternalHistoryResolver):
+                with resolver.binding_context.unbound():
+                    return await boundary(scope, receive, send)
+        return await boundary(scope, receive, send)
+
+
+def create_app(dispatcher, public_host, *, history_runtime=None, history_resolver=None,
+               history_boundary_migration=False):
     """Configure the existing Engine external-OAuth MCP endpoint as this /mcp.
 
     The external OAuth issuer/consent UI is a separate prerequisite, not created
     by this function. All tools AND receipt resources use the same boundary.
     No disk credentials, live connections, or token issuers are supplied here.
+    History is opt-in, with an agent-owned runtime and trusted per-request
+    resolver supplied together. No request header can turn this option on.
+    Explicit history_boundary_migration=True retains a separate history-free
+    OAuth server for requests with neither proof header. Any proof header,
+    including empty/duplicate headers, selects strict verification only.
+    The default remains strict whenever history is configured.
     """
     if not isinstance(dispatcher, RequesterDispatcher):
         raise ExpenseError("本人別の認証・接続ディスパッチが必要です。")
+    if type(history_boundary_migration) is not bool:
+        raise ExpenseError("Explicit history boundary migration setting required")
+    if (history_runtime is None) != (history_resolver is None):
+        raise ExpenseError("履歴には検証済みの実行情報と読取接続の両方が必要です。")
+    if history_runtime is not None:
+        from _foundation.history_runtime import ConversationRuntime
+        if not isinstance(history_runtime, ConversationRuntime) or not callable(history_resolver):
+            raise ExpenseError("履歴には信頼済みの接続アダプターが必要です。")
     if (
         not isinstance(public_host, str)
         or not public_host
@@ -120,9 +248,20 @@ def create_app(dispatcher, public_host):
         or public_host.endswith((".", "-"))
     ):
         raise ExpenseError("HTTPS接続窓口の正確なホスト名を指定してください。")
+    if history_boundary_migration and history_runtime is not None:
+        return _HistoryBoundaryMigration(
+            create_app(dispatcher, public_host),
+            create_app(dispatcher, public_host, history_runtime=history_runtime,
+                       history_resolver=history_resolver),
+        )
     context = ContextVar("expense_authenticated_bearer", default=None)
     service = _RequestService(dispatcher, context)
-    server = create_server(service, receipt_reader=service.read_receipt)
+    server = create_server(
+        service, receipt_reader=service.read_receipt,
+        tool_catalog=lambda: dispatcher.available_operations(service._context()),
+        receipt_resources=dispatcher.receipt_resources,
+        conversation_reader=history_runtime,
+    )
     transport = server.streamable_http_app(
         stateless_http=True,
         json_response=True,
@@ -131,4 +270,8 @@ def create_app(dispatcher, public_host):
             allowed_hosts=[public_host], allowed_origins=["https://" + public_host]
         ),
     )
-    return RequestAuthorization(transport, dispatcher, context)
+    return RequestAuthorization(
+        transport, dispatcher, context,
+        history_runtime=history_runtime, history_resolver=history_resolver,
+        history_target="https://" + public_host + "/mcp" if history_runtime is not None else None,
+    )

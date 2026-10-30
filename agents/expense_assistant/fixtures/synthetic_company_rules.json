@@ -1,0 +1,18 @@
+{
+  "schema_version": "receipt-company-rules/v1",
+  "synthetic": true,
+  "companies": {
+    "synthetic-meeting": {
+      "label": "架空会議会社",
+      "account": "会議費",
+      "max_total": 500,
+      "exceed_action": "warning"
+    },
+    "synthetic-strict": {
+      "label": "架空上限確認会社",
+      "account": "会議費",
+      "max_total": 500,
+      "exceed_action": "block"
+    }
+  }
+}

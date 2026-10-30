@@ -2,7 +2,13 @@
 
 import hashlib
 import json
+import re
 from pathlib import Path
+
+
+def _valid_receipt(value):
+    return (isinstance(value, str) and bool(value.strip()) and len(value.strip()) <= 500
+            and not re.search(r"<@|@channel|@here|https?://", value, re.IGNORECASE))
 
 
 def load_contract(root=None):
@@ -16,8 +22,9 @@ def load_contract(root=None):
         or policy.get("conversation_binding") != "verified_requester_and_invoked_agent"
         or policy.get("missing_private_delivery") != "withhold_result_no_origin_fallback"
         or policy.get("origin_notification", {}).get("mode") != "fixed_receipt_only"
-        or not isinstance(policy.get("origin_notification", {}).get("text"), str)
-        or not policy["origin_notification"]["text"].strip()
+        or not _valid_receipt(policy.get("origin_notification", {}).get("text"))
+        or ("same_conversation_text" in policy.get("origin_notification", {})
+            and not _valid_receipt(policy["origin_notification"]["same_conversation_text"]))
         or set(policy.get("protected_outputs", []))
         != {
             "answer",
@@ -48,6 +55,20 @@ def load_contract(root=None):
         ):
             raise ValueError("Unsupported private conversation binding")
     return {"policy": policy, "source_sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def receipt_text(*, verified_same_requester_agent_conversation=False, root=None):
+    """Host supplies verified identity/visibility/destination equality, never model text.
+
+    This selects notification wording only, not recipients or access rights.
+    Old contracts retain their original receipt when the optional text is absent.
+    """
+    if type(verified_same_requester_agent_conversation) is not bool:
+        raise ValueError("Verified conversation match must be boolean")
+    notice = load_contract(root)["policy"]["origin_notification"]
+    if verified_same_requester_agent_conversation:
+        return notice.get("same_conversation_text", notice["text"])
+    return notice["text"]
 
 
 def resolve_binding(platform, *, verified_capabilities, verified_guarantees, root=None):

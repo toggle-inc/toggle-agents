@@ -1,5 +1,8 @@
 # エージェント自身が持つ認証・同意・リソーストークン
 
+本人別のMF・カレンダー接続GUIと障害時の扱いは [SERVICE_CONNECTIONS.md](SERVICE_CONNECTIONS.md) を参照。
+これは実サービス配置前のHTTP実装であり、現在の固定キー接続の本人別認証化は別途必要。
+
 ## 標準方針の更新：platformでログイン済みの本人を使う
 
 標準は `authorization_host.create_platform_host`。SA等が確認済みの本人情報を署名して渡し、

@@ -481,13 +481,18 @@ class PrivatePolicy:
         self.version, self.position = expected_sha256, position
         self._module = None
 
-    def check(self, **fields):
+    def verify(self):
+        """Recheck the approved bytes without executing policy code or MF I/O."""
         try:
             contents = self.path.read_bytes()
         except OSError as error:
             raise ExpenseError("認可された社内規則が見つかりません。") from error
         if self.path.is_symlink() or hashlib.sha256(contents).hexdigest() != self.version:
             raise ExpenseError("社内規則の版を確認できません。登録を停止します。")
+        return contents
+
+    def check(self, **fields):
+        contents = self.verify()
         if self._module is None:
             module = types.ModuleType("private_expense_policy")
             module.__file__ = str(self.path)

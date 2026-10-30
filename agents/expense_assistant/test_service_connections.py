@@ -1,0 +1,303 @@
+"""Synthetic signed platform HTTP -> agent-owned per-person service connection GUI."""
+
+from urllib.parse import urlencode
+from unittest.mock import patch
+
+import httpx
+
+from authorization_app import create_app
+from runtime.connection_providers import build_service_connections
+from runtime.service_connections import ConnectionProvider, ServiceConnections
+import test_platform_login as platform_fixture
+from runtime.requester import Requester
+
+
+class ServiceConnectionTests(platform_fixture.PlatformLoginTests):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.states = {("alice", "mf"): "not_connected", ("bob", "mf"): "connected"}
+        self.begun = []
+
+        def begin(person, provider):
+            self.begun.append((person.person_id, provider))
+            return "https://expense.example.provider/oauth/authorize?state=synthetic"
+
+        self.manager = ServiceConnections(
+            self.fixture.store,
+            providers=(ConnectionProvider("mf", "マネーフォワード", frozenset({"https://expense.example.provider"})),),
+            status=lambda person, provider: self.states[(person.person_id, provider)],
+            begin=begin,
+            clock=lambda: self.now,
+        )
+        self.app = self.login.wrap(create_app(
+            self.authority, self.resolve, platform_login=self.login,
+            service_connections=self.manager,
+        ))
+        await self.client.aclose()
+        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(self.app), base_url=self.origin)
+        self.addAsyncCleanup(self.client.aclose)
+
+    async def connection_view(self, person="alice", *, html=False):
+        return await self.client.get("/connections", headers={
+            **self.signed("GET", "/connections", person=person),
+            "accept": "text/html" if html else "application/json",
+        })
+
+    async def start_connection(self, csrf, person="alice", **extra):
+        body = urlencode({"provider": "mf", "csrf_token": csrf, **extra}).encode()
+        return await self.client.post("/connections/start", content=body, headers={
+            **self.signed("POST", "/connections/start", body, person=person),
+            "content-type": "application/x-www-form-urlencoded",
+        })
+
+    async def test_setup_requires_signed_owner_and_registered_client(self):
+        path = "/setup?client_id=sa"
+        self.assertEqual((await self.client.get(path)).status_code, 401)
+        response = await self.client.get(path, headers=self.signed("GET", path))
+        self.assertEqual(response.status_code, 200, response.text)
+        view = response.json()
+        self.assertEqual(view["schema_version"], "agent-setup/v1")
+        self.assertEqual(view["status"], "blocked")
+        self.assertTrue(view["missing_runtime_capabilities"])
+        self.assertIn("no-store", response.headers["cache-control"])
+        self.assertNotIn("person_id", view)
+        self.assertEqual(self.begun, [])
+        for bad in ("/setup", "/setup?client_id=missing", "/setup?client_id=sa&owner=bob"):
+            reply = await self.client.get(bad, headers=self.signed("GET", bad))
+            self.assertEqual(reply.status_code, 400, reply.text)
+
+    async def test_setup_signature_binds_exact_client_query(self):
+        response = await self.client.get(
+            "/setup?client_id=sa", headers=self.signed("GET", "/setup?client_id=other"),
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.begun, [])
+
+    async def test_signed_gui_has_connect_button_and_no_key_fields(self):
+        page = await self.connection_view(html=True)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("マネーフォワードに接続する", page.text)
+        self.assertNotIn('name="person', page.text)
+        self.assertNotIn('name="token', page.text)
+        self.assertIn("no-store", page.headers["cache-control"])
+        self.assertIn("frame-ancestors 'none'", page.headers["content-security-policy"])
+        self.assertIn(
+            "form-action 'self' https://expense.example.provider;",
+            page.headers["content-security-policy"],
+        )
+        consent_path = self.authorize_path()
+        consent = await self.client.get(consent_path, headers=self.signed("GET", consent_path))
+        self.assertNotIn("expense.example.provider", consent.headers["content-security-policy"])
+        bob = await self.connection_view("bob", html=True)
+        self.assertIn("接続済み", bob.text)
+        self.assertNotIn("に接続する</button>", bob.text)
+
+    async def test_per_person_authorization_start_is_one_time_and_not_a_financial_write(self):
+        view = (await self.connection_view()).json()
+        csrf = view["csrf_token"]
+        response = await self.start_connection(csrf)
+        self.assertEqual(response.status_code, 303, response.text)
+        self.assertEqual(self.begun, [("alice", "mf")])
+        self.assertTrue(response.headers["location"].startswith("https://expense.example.provider/"))
+        replay = await self.start_connection(csrf)
+        self.assertEqual(replay.status_code, 503)
+        self.assertEqual(len(self.begun), 1)
+
+    async def test_other_person_expiry_and_model_chosen_identity_are_refused(self):
+        csrf = (await self.connection_view()).json()["csrf_token"]
+        self.assertEqual((await self.start_connection(csrf, "bob")).status_code, 503)
+        self.assertEqual((await self.start_connection(csrf, person_id="bob")).status_code, 400)
+        self.manager.clock = lambda: self.now + 301
+        self.assertEqual((await self.start_connection(csrf)).status_code, 503)
+        self.assertEqual(self.begun, [])
+
+    async def test_provider_outage_has_no_reauthorization_button_or_raw_exception(self):
+        self.states[("alice", "mf")] = "unavailable"
+        page = await self.connection_view(html=True)
+        self.assertIn("一時的に利用できません", page.text)
+        self.assertIn("復旧を待ってください", page.text)
+        self.assertNotIn("設定未完了", page.text)
+        self.assertNotIn("に接続する</button>", page.text)
+        csrf = (await self.connection_view()).json()["csrf_token"]
+        self.assertEqual((await self.start_connection(csrf)).status_code, 503)
+        self.assertEqual(self.begun, [])
+        def broken(*args):
+            raise RuntimeError("synthetic-secret-must-not-leak")
+        self.manager.status = broken
+        page = await self.connection_view(html=True)
+        self.assertNotIn("synthetic-secret", page.text)
+        self.assertIn("一時的に利用できません", page.text)
+        view = await self.connection_view()
+        self.assertEqual(view.json()["connections"][0]["status"], "unavailable")
+        self.assertNotIn("synthetic-secret", view.text)
+
+    async def test_not_configured_has_no_connect_or_recovery_prompt_and_refuses_start(self):
+        self.states[("alice", "mf")] = "not_configured"
+        page = await self.connection_view(html=True)
+        self.assertIn("設定未完了", page.text)
+        for hidden in ("<button", "<form", "再認証", "復旧", "一時的に利用できません"):
+            self.assertNotIn(hidden, page.text)
+        view = (await self.connection_view()).json()
+        self.assertEqual(view["schema_version"], "agent-service-connections/v1")
+        self.assertEqual(view["connections"][0]["status"], "not_configured")
+        self.assertEqual((await self.start_connection(view["csrf_token"])).status_code, 503)
+        self.assertEqual(self.begun, [])
+
+    async def test_unknown_status_and_private_metadata_are_not_exposed(self):
+        for private_status in ("private-provider-error", {"status": "connected", "private_metadata": "secret"}):
+            with self.subTest(status=private_status):
+                self.states[("alice", "mf")] = private_status
+                view = await self.connection_view()
+                self.assertEqual(view.json()["connections"][0]["status"], "unavailable")
+                page = await self.connection_view(html=True)
+                self.assertIn("一時的に利用できません", page.text)
+                for hidden in ("private-provider-error", "private_metadata", "secret"):
+                    self.assertNotIn(hidden, view.text)
+                    self.assertNotIn(hidden, page.text)
+
+    def test_missing_adapter_is_distinct_from_configured_provider_outage(self):
+        from unittest.mock import Mock
+
+        person = Requester("synthetic-tenant", "alice", self.now + 600)
+        for configured, missing in (("mf", "calendar"), ("calendar", "mf")):
+            adapter = Mock()
+            manager = build_service_connections(
+                self.fixture.store, **{configured: adapter}, clock=lambda: self.now,
+            )
+            for failure in (False, True):
+                with self.subTest(configured=configured, exception=failure):
+                    adapter.status.return_value = "unavailable"
+                    adapter.status.side_effect = RuntimeError("private-outage") if failure else None
+                    view = manager.view(person)
+                    self.assertEqual({row["id"]: row["status"] for row in view["connections"]},
+                                     {configured: "unavailable", missing: "not_configured"})
+                    self.assertNotIn("private-outage", str(view))
+                    with self.assertRaises(ValueError):
+                        manager.start(person, missing, view["csrf_token"])
+            adapter.begin.assert_not_called()
+
+    async def test_unsigned_target_tampering_and_arbitrary_redirect_are_refused(self):
+        self.assertEqual((await self.client.get("/connections")).status_code, 401)
+        signed = self.signed("GET", "/oauth/authorize")
+        self.assertEqual((await self.client.get("/connections", headers=signed)).status_code, 401)
+        csrf = (await self.connection_view()).json()["csrf_token"]
+        self.manager.begin = lambda *args: "https://attacker.example/steal"
+        response = await self.start_connection(csrf)
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("location", response.headers)
+
+    async def test_wrong_origin_provider_and_changed_body_cannot_start_connections(self):
+        csrf = (await self.connection_view()).json()["csrf_token"]
+        body = urlencode({"provider": "mf", "csrf_token": csrf}).encode()
+        headers = self.signed("POST", "/connections/start", body)
+        response = await self.client.post("/connections/start", content=body, headers={
+            **headers, "origin": "https://attacker.example",
+            "content-type": "application/x-www-form-urlencoded",
+        })
+        self.assertEqual(response.status_code, 401)
+        changed = body.replace(b"provider=mf", b"provider=calendar")
+        response = await self.client.post("/connections/start", content=changed, headers={
+            **self.signed("POST", "/connections/start", body),
+            "content-type": "application/x-www-form-urlencoded",
+        })
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.begun, [])
+    async def test_missing_deployment_adapter_never_claims_connected(self):
+        app = self.login.wrap(create_app(self.authority, self.resolve, platform_login=self.login))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=self.origin) as client:
+            response = await client.get("/connections", headers=self.signed("GET", "/connections"))
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"], "service_connections_unavailable")
+
+    async def test_calendar_authorization_uses_only_current_person_and_configured_origin(self):
+        self.states[("alice", "calendar")] = "expired"
+        self.manager.providers["calendar"] = ConnectionProvider(
+            "calendar", "Googleカレンダー", frozenset({"https://calendar.example.provider"})
+        )
+        self.manager.begin = lambda person, provider: "https://calendar.example.provider/authorize"
+        page = await self.connection_view(html=True)
+        self.assertIn("Googleカレンダーに接続する", page.text)
+        csrf = (await self.connection_view()).json()["csrf_token"]
+        body = urlencode({"provider": "calendar", "csrf_token": csrf}).encode()
+        response = await self.client.post("/connections/start", content=body, headers={
+            **self.signed("POST", "/connections/start", body),
+            "content-type": "application/x-www-form-urlencoded",
+        })
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "https://calendar.example.provider/authorize")
+
+    async def test_wrong_tenant_login_cannot_read_or_start_service_connection(self):
+        other = Requester("another-tenant", "alice", self.now + 600)
+        with patch.object(self.authority, "verify_login", return_value=other):
+            response = await self.connection_view()
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.begun, [])
+
+    async def test_callback_requires_same_signed_person_and_discards_provider_secrets(self):
+        calls = []
+        def complete(person, provider, params):
+            if person.person_id != "alice" or params != {"code": "synthetic", "state": "alice-state"}:
+                raise ValueError("callback owner mismatch")
+            calls.append((person.person_id, provider))
+            self.states[("alice", "mf")] = "connected"
+            return {"access_token": "synthetic-secret-not-for-ui"}
+        self.manager._complete = complete
+        path = "/connections/callback?" + urlencode({
+            "provider": "mf", "code": "synthetic", "state": "alice-state",
+        })
+        wrong = await self.client.get(path, headers=self.signed("GET", path, person="bob"))
+        self.assertEqual(wrong.status_code, 400)
+        self.assertEqual(calls, [])
+        response = await self.client.get(path, headers={**self.signed("GET", path), "accept": "application/json"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {
+            "schema_version": "agent-service-connection-result/v1", "provider": "mf", "status": "connected",
+        })
+        self.assertNotIn("synthetic-secret", response.text)
+        self.assertEqual(calls, [("alice", "mf")])
+        self.assertIn("no-store", response.headers["cache-control"])
+        duplicate = path + "&state=another"
+        self.assertEqual((await self.client.get(duplicate, headers=self.signed("GET", duplicate))).status_code, 400)
+
+    async def test_callback_post_keeps_code_out_of_url_and_binds_exact_body_and_origin(self):
+        calls = []
+        self.manager._complete = lambda person, provider, params: calls.append((person.person_id, params))
+        path = "/connections/callback"
+        body = urlencode({"provider": "mf", "code": "synthetic-code", "state": "alice-state"}).encode()
+        def headers(data, **extra):
+            return {**self.signed("POST", path, data), "accept": "application/json",
+                    "content-type": "application/x-www-form-urlencoded", **extra}
+        response = await self.client.post(path, content=body, headers=headers(body))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(str(response.request.url), self.origin + path)
+        self.assertEqual(calls, [("alice", {"code": "synthetic-code", "state": "alice-state"})])
+        self.assertNotIn("synthetic-code", response.text)
+        tampered = body.replace(b"synthetic-code", b"modified-code")
+        self.assertEqual((await self.client.post(path, content=tampered, headers=headers(body))).status_code, 401)
+        self.assertEqual((await self.client.post(path, content=body, headers=headers(body, origin="https://attacker.example"))).status_code, 401)
+        self.assertEqual((await self.client.post(path + "?code=forbidden", content=body,
+                                               headers=headers(body))).status_code, 401)
+        self.assertEqual(len(calls), 1)
+
+    async def test_google_callback_metadata_is_not_used_as_identity_or_permission(self):
+        self.manager.providers["calendar"] = ConnectionProvider(
+            "calendar", "Googleカレンダー", frozenset({"https://accounts.google.com"})
+        )
+        self.states[("alice", "calendar")] = "connected"
+        observed = []
+        self.manager._complete = lambda person, provider, params: observed.append((person.person_id, params))
+        path = "/connections/callback?" + urlencode({
+            "provider": "calendar", "code": "synthetic", "state": "synthetic-state",
+            "scope": "informational-not-a-permission-grant", "authuser": "0",
+            "hd": "not-an-identity-proof.example", "iss": "https://accounts.google.com",
+        })
+        response = await self.client.get(path, headers=self.signed("GET", path))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(observed, [("alice", {"code": "synthetic", "state": "synthetic-state"})])
+        invalid = path.replace("https%3A%2F%2Faccounts.google.com", "https%3A%2F%2Fattacker.example")
+        self.assertEqual((await self.client.get(invalid, headers=self.signed("GET", invalid))).status_code, 400)
+
+if __name__ == "__main__":
+    import unittest
+
+    unittest.main()

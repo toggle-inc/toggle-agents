@@ -13,10 +13,15 @@ FILES = (
     "test_conversation.py",
     "history_sources.py",
     "test_history_sources.py",
+    "history_runtime.py",
+    "test_history_runtime.py",
     "HISTORY_CONNECTIONS.md",
     "platform_identity.py",
     "test_platform_identity.py",
     "PLATFORM_IDENTITY.md",
+    "execution_binding.py",
+    "test_execution_binding.py",
+    "EXECUTION_BINDING.md",
 )
 
 

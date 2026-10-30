@@ -42,6 +42,13 @@ class _VerifiedPlatformRequests:
         if scope["type"] != "http" or scope.get("path") not in {
             "/oauth/authorize",
             "/oauth/consent",
+            "/connections",
+            "/connections/start",
+            "/connections/callback",
+            "/setup",
+            "/execution/status",
+            "/memory",
+            "/memory/decision",
         }:
             return await self.app(scope, receive, send)
         try:
@@ -58,7 +65,12 @@ class _VerifiedPlatformRequests:
                 or values(b"host") != [urlsplit(origin).netloc]
                 or len(proofs) != 1
                 or len(source_origin) > 1
-                or scope["method"] != ("GET" if scope["path"] == "/oauth/authorize" else "POST")
+                or scope["method"] not in (
+                    {"GET", "POST"} if scope["path"] == "/connections/callback"
+                    else {"GET"} if scope["path"] in {"/oauth/authorize", "/connections", "/memory", "/setup"}
+                    else {"POST"}
+                )
+                or (scope["method"] == "POST" and scope.get("query_string", b""))
             ):
                 raise PlatformIdentityError
             chunks, size = [], 0

@@ -27,10 +27,11 @@ CAPABILITY_LABELS = {
     "calendar:read": "本人のカレンダーを読む",
     "fare:read": "交通運賃を調べる",
     "rules:read": "許可済みの社内規則・資料を読む",
-    "attachment:read": "本人が許可した添付を取得する",
+    "attachment:read": "本人の添付画像を取得・文字認識し、本人専用の領収書・経費下書きを保存する（MF未登録）",
     "receipt:read": "本人の保存済み領収書を読む",
     "memory:read": "本人の設定・記憶・保留事項を読む",
     "memory:propose": "本人の記憶候補を作る",
+    "memory:write": "会話から必要な本人の設定・好み・保留事項を保存する（都度確認なし）",
     "contract:read": "エージェントの配送ルールを読む",
 }
 
@@ -247,6 +248,24 @@ class AgentAuthorization:
 
     def _consent_key(self, person, client_id):
         return self._key("consent", person.owner + "\n" + client_id)
+
+    def consented_requester(self, context, client_id, capabilities):
+        """Read-only execution readiness check; never creates consent or a token.
+
+        A platform login proves identity only. The agent's existing, explicit
+        per-person OAuth consent must independently authorize every capability.
+        """
+        person, client = self._login(context), self._client(client_id)
+        if (not isinstance(capabilities, frozenset) or not capabilities
+                or not capabilities <= client.capabilities):
+            raise AuthorizationError("invalid_scope")
+        with self.store.transaction() as records:
+            consent = records.get(self._consent_key(person, client_id))
+            if (not consent or consent.get("revoked", True)
+                    or not capabilities <= set(consent.get("capabilities", []))):
+                raise AuthorizationError("consent_required")
+        return Requester(person.tenant_id, person.person_id, person.expires_at,
+                         capabilities=capabilities)
 
     def _current(self, records, record, *, refresh=False):
         if not record or record.get("revoked", False):

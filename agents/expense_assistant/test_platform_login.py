@@ -1,6 +1,7 @@
 """Signed platform requests -> consent -> OAuth/MCP; no real SA, Okta or MF."""
 
 import functools
+import dataclasses
 import hashlib
 import json
 import secrets
@@ -156,6 +157,39 @@ class PlatformLoginTests(unittest.IsolatedAsyncioTestCase):
                 "content-type": "application/x-www-form-urlencoded",
             },
         )
+
+    async def test_readiness_requires_signed_human_current_consent_and_fresh_grant(self):
+        self.authority.clients['sa'] = dataclasses.replace(
+            self.authority.clients['sa'], capabilities=frozenset({'mf:read'}))
+        path = '/execution/status'
+        params = {'schema_version': 'agent-execution-readiness-request/v1',
+                  'request_id': 'synthetic-invocation', 'client_id': 'sa'}
+        body = json.dumps(params).encode()
+        async def status(person='alice', headers=None, payload=body):
+            return await self.client.post(path, content=payload, headers={
+                'content-type': 'application/json',
+                **(headers if headers is not None else self.signed('POST', path, payload, person=person))})
+        self.assertEqual((await status(headers={})).status_code, 401)
+        missing = await status()
+        self.assertEqual(missing.status_code, 200)
+        self.assertEqual(missing.json()['reason'], 'agent_authorization_required')
+        self.assertEqual((await self.consent()).status_code, 303)
+        granted = await status()
+        self.assertTrue(granted.json()['ready'])
+        self.assertEqual(granted.json()['request_id'], params['request_id'])
+        self.assertFalse((await status('bob')).json()['ready'])
+        replay = self.signed('POST', path, body)
+        self.assertEqual((await status(headers=replay)).status_code, 200)
+        self.assertEqual((await status(headers=replay)).status_code, 401)
+        self.assertEqual((await status(payload=body[:-1] + b',"client_id":"sa"}')).status_code, 400)
+        self.assertEqual((await status(payload=json.dumps({**params, 'person_id': 'bob'}).encode())).status_code, 400)
+        with self.fixture.store.transaction() as records:
+            person = self.fixture.people['alice']
+            # Platform and fixture use the same canonical owner, not emails.
+            key = self.authority._consent_key(person, 'sa')
+            saved = records.get(key)
+            records.put(key, {**saved, 'revoked': True})
+        self.assertFalse((await status()).json()['ready'])
 
     @with_platform_server
     async def test_logged_in_platform_people_consent_and_receive_only_their_mcp_data(self):

@@ -3,6 +3,7 @@
 import contextlib
 import html
 import inspect
+import json
 from urllib.parse import parse_qs, urlsplit
 
 from requester_mcp import create_app as create_mcp
@@ -13,6 +14,7 @@ from runtime.authorization import (
     AuthorizationError,
 )
 from runtime.requester import RequesterDispatcher
+from runtime.memory_management import MemoryRequestError
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
@@ -41,8 +43,9 @@ def _parameters(value):
 
 
 class _PrivateHTTPS:
-    def __init__(self, app, origin):
+    def __init__(self, app, origin, *, connection_form_origins=()):
         self.app, self.origin = app, origin
+        self.connection_form_origins = tuple(connection_form_origins)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -60,6 +63,11 @@ class _PrivateHTTPS:
 
         async def private_send(message):
             if message["type"] == "http.response.start":
+                form_action = "form-action 'self'"
+                if scope.get("path") == "/connections" and self.connection_form_origins:
+                    # Chromium applies form-action to a POST's redirect chain.
+                    # Only this GUI may redirect to explicitly configured providers.
+                    form_action += " " + " ".join(self.connection_form_origins)
                 headers = [
                     (k, v)
                     for k, v in message.get("headers", ())
@@ -69,8 +77,8 @@ class _PrivateHTTPS:
                     (b"cache-control", b"no-store"),
                     (
                         b"content-security-policy",
-                        b"default-src 'none'; frame-ancestors 'none'; "
-                        b"form-action 'self'; base-uri 'none'",
+                        ("default-src 'none'; frame-ancestors 'none'; "
+                         + form_action + "; base-uri 'none'").encode("ascii"),
                     ),
                     (b"referrer-policy", b"no-referrer"),
                     (b"x-content-type-options", b"nosniff"),
@@ -97,6 +105,10 @@ def create_app(
     login_adapter=None,
     draft_consent=None,
     platform_login=None,
+    service_connections=None,
+    history_factory=None,
+    history_boundary_migration=False,
+    memory_management=None,
 ):
     """Host supplies SSO verification + private storage/providers, not auth logic.
 
@@ -109,6 +121,9 @@ def create_app(
     """
     if not isinstance(authority, AgentAuthorization):
         raise ValueError("Agent-owned authority is required")
+    if (type(history_boundary_migration) is not bool
+            or (history_boundary_migration and history_factory is None)):
+        raise ValueError("History boundary migration requires explicit configured history")
     if draft_consent is not None:
         from runtime.draft_consent import DraftConsentBinding
 
@@ -118,6 +133,16 @@ def create_app(
         ):
             raise ValueError("Draft consent must use this same agent-owned authority")
     origin = authority.issuer
+    if memory_management is not None:
+        from runtime.memory_management import MemoryManagement
+        if not isinstance(memory_management, MemoryManagement) or memory_management.store is not authority.store:
+            raise ValueError('Memory management must use this same private store')
+    if service_connections is not None:
+        from runtime.service_connections import ServiceConnections
+
+        if not isinstance(service_connections, ServiceConnections) or service_connections.store is not authority.store:
+            raise ValueError("Service connections must use this same private store")
+        service_connections.personal_memory_supported = memory_management is not None
     if platform_login is not None:
         from runtime.platform_login import PlatformLogin
 
@@ -142,11 +167,128 @@ def create_app(
             raise ValueError("Okta adapter tenant, session verifier, and fixed callback must match")
         start_login = login_adapter.start_login
     dispatcher = RequesterDispatcher(authority.authenticate, resolve, clock=authority.clock)
-    mcp = create_mcp(dispatcher, urlsplit(origin).hostname)
+    history_options = {}
+    if history_factory is not None:
+        if not callable(history_factory):
+            raise ValueError("Explicit store-aware history factory required")
+        pair = history_factory(authority.store)
+        if not isinstance(pair, tuple) or len(pair) != 2 or any(v is None for v in pair):
+            raise ValueError("Explicit history runtime and resolver required")
+        history_options = {"history_runtime": pair[0], "history_resolver": pair[1]}
+        if history_boundary_migration:
+            history_options["history_boundary_migration"] = True
+    mcp = create_mcp(dispatcher, urlsplit(origin).hostname, **history_options)
 
     async def endpoint(request):
         try:
             path = request.url.path
+            if path in {'/memory', '/memory/decision'}:
+                person = authority._login(request)
+                if memory_management is None:
+                    return JSONResponse({'error': 'memory_unavailable'}, status_code=503)
+                if path == '/memory':
+                    query = _parameters(request.url.query) if request.url.query else {}
+                    if set(query) - {'cursor'}:
+                        raise AuthorizationError('invalid_request')
+                    try:
+                        return memory_management.render(person, as_json=request.headers.getlist('accept') == ['application/json'],
+                                                        cursor=query.get('cursor'))
+                    except MemoryRequestError:
+                        return JSONResponse({'error': 'invalid_memory_request'}, status_code=400)
+                    except Exception:
+                        return JSONResponse({'error': 'memory_unavailable'}, status_code=503)
+                if request.url.query:
+                    raise AuthorizationError('invalid_request')
+                if ((platform_login is None and request.headers.getlist('origin') != [origin])
+                        or (platform_login is not None and not platform_login.allows_consent_origin(request))):
+                    raise AuthorizationError('invalid_request')
+                params = await _form(request)
+                try:
+                    result = memory_management.decide(person, params)
+                except MemoryRequestError:
+                    return JSONResponse({'error': 'invalid_memory_request'}, status_code=400)
+                except Exception:
+                    return JSONResponse({'error': 'memory_decision_conflict'}, status_code=409)
+                if request.headers.getlist('accept') == ['application/json']:
+                    return JSONResponse(result)
+                return HTMLResponse('<!doctype html><html lang="ja"><meta charset="utf-8">'
+                    '<title>記憶の更新</title><h1>記憶を更新しました</h1>'
+                    '<a href="/memory">本人の記憶に戻る</a></html>')
+            if path == "/execution/status":
+                if (platform_login is None or not platform_login.allows_consent_origin(request)
+                        or request.url.query or request.headers.get("content-type", "").split(";", 1)[0] != "application/json"):
+                    raise AuthorizationError("invalid_request")
+                def unique(pairs):
+                    result = {}
+                    for key, value in pairs:
+                        if key in result:
+                            raise ValueError("Duplicate field")
+                        result[key] = value
+                    return result
+                from runtime.execution_readiness import ExecutionReadiness
+                params = json.loads(await request.body(), object_pairs_hook=unique)
+                return JSONResponse(ExecutionReadiness(authority, resolve).view(request, params),
+                                    headers={"cache-control": "no-store"})
+            if path == "/setup":
+                person = authority._login(request)
+                if service_connections is None:
+                    return JSONResponse({"error": "service_connections_unavailable"}, status_code=503)
+                params = _parameters(request.url.query)
+                if set(params) != {"client_id"}:
+                    raise AuthorizationError("invalid_request")
+                from runtime.agent_setup import AgentSetup
+
+                setup_capabilities = getattr(resolve, "setup_capabilities", None)
+                return JSONResponse(AgentSetup(
+                    authority, service_connections, clock=authority.clock,
+                    available_capabilities=(setup_capabilities()
+                        if callable(setup_capabilities) else None),
+                ).view(person, params["client_id"]))
+            if path in {"/connections", "/connections/start", "/connections/callback"}:
+                person = authority._login(request)
+                if service_connections is None:
+                    return JSONResponse({"error": "service_connections_unavailable"}, status_code=503)
+                if path == "/connections/callback":
+                    if request.method == "POST":
+                        if request.url.query or (
+                            platform_login is None and request.headers.getlist("origin") != [origin]
+                        ) or (
+                            platform_login is not None and not platform_login.allows_consent_origin(request)
+                        ):
+                            raise AuthorizationError("invalid_request")
+                        params = await _form(request)
+                    else:
+                        params = _parameters(request.url.query)
+                    provider = params.pop("provider", None)
+                    try:
+                        result = service_connections.complete(person, provider, params)
+                    except Exception:
+                        return JSONResponse({"error": "service_connection_callback_failed"}, status_code=400)
+                    if request.headers.getlist("accept") == ["application/json"]:
+                        return JSONResponse(result)
+                    return HTMLResponse(
+                        '<!doctype html><html lang="ja"><meta charset="utf-8">'
+                        '<title>サービス連携の確認</title><h1>認証の応答を受け付けました</h1>'
+                        '<p>接続状態を確認してください。</p><a href="/connections">サービス連携へ戻る</a></html>'
+                    )
+                if path == "/connections":
+                    if request.url.query:
+                        raise AuthorizationError("invalid_request")
+                    return service_connections.render(
+                        person, as_json=request.headers.getlist("accept") == ["application/json"]
+                    )
+                if (platform_login is None and request.headers.getlist("origin") != [origin]) or (
+                    platform_login is not None and not platform_login.allows_consent_origin(request)
+                ):
+                    raise AuthorizationError("invalid_request")
+                params = await _form(request)
+                if set(params) != {"provider", "csrf_token"}:
+                    raise AuthorizationError("invalid_request")
+                try:
+                    target = service_connections.start(person, params["provider"], params["csrf_token"])
+                except Exception:
+                    return JSONResponse({"error": "service_connection_start_unavailable"}, status_code=503)
+                return RedirectResponse(target, status_code=303)
             if path == "/.well-known/oauth-authorization-server":
                 return JSONResponse(
                     {
@@ -240,14 +382,15 @@ def create_app(
                     + html.escape(pending["client_name"])
                     + "から、本人の接続を使って次の操作を呼べるようにします。</p><ul>"
                     + scopes
-                    + "</ul><p>MF・カレンダーへの連携同意は別に必要です。"
+                    + "</ul><p>一覧の操作を、下のボタンでまとめて許可できます。"
+                    "未接続のMF・カレンダーでは、各サービスの認証画面でも同意が必要です。"
                     "既存明細の変更・削除には別の本人承認が必要です。</p>"
                     "<p>この利用許可は解除するまで継続し、接続用トークンを自動更新できます。"
                     "不正な使い回しの検出時には停止します。</p>"
                     '<form method="post" action="/oauth/consent">'
                     + fields
                     + draft_fields
-                    + '<button name="decision" value="approve">許可する</button>'
+                    + '<button name="decision" value="approve">一覧の内容をまとめて許可する</button>'
                     '<button name="decision" value="deny" formnovalidate>許可しない</button>'
                     '<button name="decision" value="revoke" formnovalidate>'
                     "既存の利用許可も解除する</button></form></html>"
@@ -344,6 +487,13 @@ def create_app(
             ("/oauth/consent", ["POST"]),
             ("/oauth/token", ["POST"]),
             ("/oauth/revoke", ["POST"]),
+            ("/connections", ["GET"]),
+            ("/connections/start", ["POST"]),
+            ("/connections/callback", ["GET", "POST"]),
+            ("/setup", ["GET"]),
+            ("/execution/status", ["POST"]),
+            ("/memory", ["GET"]),
+            ("/memory/decision", ["POST"]),
         )
     ]
     if login_adapter is not None:
@@ -354,4 +504,11 @@ def create_app(
             )
         )
     routes.append(Mount("/", app=mcp))
-    return _PrivateHTTPS(Starlette(routes=routes, lifespan=lifespan), origin)
+    return _PrivateHTTPS(
+        Starlette(routes=routes, lifespan=lifespan), origin,
+        connection_form_origins=sorted({
+            provider_origin
+            for provider in service_connections.providers.values()
+            for provider_origin in provider.authorization_origins
+        }) if service_connections is not None else (),
+    )

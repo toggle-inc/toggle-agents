@@ -78,7 +78,7 @@ def settings_from_environment(*, origin, tenant_id, okta_issuer, okta_client_id,
     )
 
 
-def create_host(settings, *, resolve_person, resolve_connection, store_factory=None):
+def create_host(settings, *, resolve_person, resolve_connection, store_factory=None, service_connections_factory=None, history_factory=None, history_boundary_migration=False):
     """Compose SSO, consent, refresh/revocation and MCP with the SAME store.
 
     resolve_person(tenant, issuer, subject) is an administrator-managed account
@@ -92,6 +92,9 @@ def create_host(settings, *, resolve_person, resolve_connection, store_factory=N
         raise ValueError("Explicit identity and per-person connection resolvers required")
     if not isinstance(settings.clients, tuple) or not settings.clients:
         raise ValueError("Explicit OAuth clients required")
+    if (type(history_boundary_migration) is not bool
+            or (history_boundary_migration and history_factory is None)):
+        raise ValueError("History boundary migration requires explicit configured history")
     store = _configured_store(settings, store_factory)
     okta = OktaOIDCLogin(
         store,
@@ -115,6 +118,9 @@ def create_host(settings, *, resolve_person, resolve_connection, store_factory=N
         resolve_connection,
         login_adapter=okta,
         draft_consent=DraftConsentBinding(authority, resolve_connection),
+        service_connections=service_connections_factory(store) if service_connections_factory else None,
+        **({"history_factory": history_factory} if history_factory is not None else {}),
+        **({"history_boundary_migration": True} if history_boundary_migration else {}),
     )
 
 
@@ -145,7 +151,7 @@ def _configured_store(settings, store_factory):
     return (store_factory or PostgresAuthorizationStore)(settings.database_url)
 
 
-def create_platform_host(settings, *, resolve_person, resolve_connection, store_factory=None):
+def create_platform_host(settings, *, resolve_person, resolve_connection, store_factory=None, service_connections_factory=None, history_factory=None, history_boundary_migration=False, memory_service_factory=None):
     """Preferred route: platform authenticates humans, agent verifies each proof.
 
     No Okta client/secret/callback/session is needed. The deployment must provide
@@ -154,13 +160,19 @@ def create_platform_host(settings, *, resolve_person, resolve_connection, store_
     """
     from _foundation.platform_identity import PlatformIdentityVerifier
     from runtime.platform_login import PlatformLogin
+    from runtime.memory_management import MemoryManagement
 
     if not isinstance(settings, PlatformAuthorizationHostSettings):
         raise ValueError("Explicit platform authorization host settings required")
     if not callable(resolve_person) or not callable(resolve_connection):
         raise ValueError("Explicit identity and per-person connection resolvers required")
+    if memory_service_factory is not None and not callable(memory_service_factory):
+        raise ValueError('Explicit memory service factory required')
     if not isinstance(settings.clients, tuple) or not settings.clients:
         raise ValueError("Explicit OAuth clients required")
+    if (type(history_boundary_migration) is not bool
+            or (history_boundary_migration and history_factory is None)):
+        raise ValueError("History boundary migration requires explicit configured history")
     store = _configured_store(settings, store_factory)
     verifier = PlatformIdentityVerifier(
         store,
@@ -184,5 +196,10 @@ def create_platform_host(settings, *, resolve_person, resolve_connection, store_
             resolve_connection,
             draft_consent=DraftConsentBinding(authority, resolve_connection),
             platform_login=login,
+            service_connections=service_connections_factory(store) if service_connections_factory else None,
+            memory_management=(MemoryManagement(
+                store, memory_service_factory(store), clock=authority.clock) if memory_service_factory else None),
+            **({"history_factory": history_factory} if history_factory is not None else {}),
+            **({"history_boundary_migration": True} if history_boundary_migration else {}),
         )
     )

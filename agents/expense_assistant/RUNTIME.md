@@ -1,5 +1,9 @@
 # 共通経費ランタイム
 
+本人別の暗号化永続profile、実起動の明示設定、候補・receiptの固定と人間向け受入手順は
+[BUSINESS_ACCEPTANCE.md](BUSINESS_ACCEPTANCE.md) を参照してください。
+既存の読み取り専用能力は維持し、追加profileやscopeを自動付与しません。
+
 このフォルダの `runtime/` が業務処理の本体です。SA・Buzz・Codexの指示をここへ複製せず、
 同じ定義・同じ本体へ接続する入口を用意します。kickflowや別のエージェントは移植対象ではありません。
 
