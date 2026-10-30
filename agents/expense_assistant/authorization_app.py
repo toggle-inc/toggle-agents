@@ -367,14 +367,15 @@ def create_app(
                     + html.escape(pending["client_name"])
                     + "から、本人の接続を使って次の操作を呼べるようにします。</p><ul>"
                     + scopes
-                    + "</ul><p>MF・カレンダーへの連携同意は別に必要です。"
+                    + "</ul><p>一覧の操作を、下のボタンでまとめて許可できます。"
+                    "未接続のMF・カレンダーでは、各サービスの認証画面でも同意が必要です。"
                     "既存明細の変更・削除には別の本人承認が必要です。</p>"
                     "<p>この利用許可は解除するまで継続し、接続用トークンを自動更新できます。"
                     "不正な使い回しの検出時には停止します。</p>"
                     '<form method="post" action="/oauth/consent">'
                     + fields
                     + draft_fields
-                    + '<button name="decision" value="approve">許可する</button>'
+                    + '<button name="decision" value="approve">一覧の内容をまとめて許可する</button>'
                     '<button name="decision" value="deny" formnovalidate>許可しない</button>'
                     '<button name="decision" value="revoke" formnovalidate>'
                     "既存の利用許可も解除する</button></form></html>"
